@@ -18,11 +18,11 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Email y contraseña requeridos.' });
     }
 
-    // Buscar usuario
+    // LEFT JOIN para soportar superadmin (tenant_id = NULL)
     const result = await query(
-      `SELECT u.*, t.nombre AS empresa_nombre, t.logo_url
+      `SELECT u.*, t.nombre AS empresa_nombre, t.logo_url, t.aprobado
        FROM usuarios u
-       JOIN tenants t ON t.id = u.tenant_id
+       LEFT JOIN tenants t ON t.id = u.tenant_id
        WHERE LOWER(u.email) = LOWER($1)`,
       [email.trim()]
     );
@@ -36,6 +36,11 @@ router.post('/login', async (req, res) => {
     const match = await bcrypt.compare(password, user.password_hash);
     if (!match) {
       return res.status(401).json({ error: 'Credenciales incorrectas.' });
+    }
+
+    // Verificar que el tenant esté aprobado (no aplica a superadmin)
+    if (user.rol !== 'superadmin' && user.aprobado === false) {
+      return res.status(403).json({ error: 'Tu cuenta está pendiente de aprobación. Contactá al administrador.' });
     }
 
     // Generar JWT con userId + tenantId (clave para multi-tenant)
@@ -75,11 +80,12 @@ router.post('/login', async (req, res) => {
 // GET /api/auth/me — verifica sesión activa
 router.get('/me', authMiddleware, async (req, res) => {
   try {
+    // LEFT JOIN para soportar superadmin (tenant_id = NULL)
     const result = await query(
       `SELECT u.id, u.nombre, u.email, u.rol, u.tenant_id,
               t.nombre AS empresa_nombre, t.logo_url
        FROM usuarios u
-       JOIN tenants t ON t.id = u.tenant_id
+       LEFT JOIN tenants t ON t.id = u.tenant_id
        WHERE u.id = $1`,
       [req.user.userId]
     );

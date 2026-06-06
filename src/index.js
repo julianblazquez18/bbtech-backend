@@ -7,11 +7,12 @@ require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
 
-const authRoutes      = require('./routes/auth');
-const estanciasRoutes = require('./routes/estancias');
-const ciclosRoutes    = require('./routes/ciclos');
-const vacasRoutes     = require('./routes/vacas');
-const historialRoutes = require('./routes/historial');
+const authRoutes        = require('./routes/auth');
+const estanciasRoutes   = require('./routes/estancias');
+const ciclosRoutes      = require('./routes/ciclos');
+const vacasRoutes       = require('./routes/vacas');
+const historialRoutes   = require('./routes/historial');
+const superadminRoutes  = require('./routes/superadmin');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -37,11 +38,12 @@ app.get('/health', (req, res) => {
 });
 
 // ── Routes ────────────────────────────────────────────────────
-app.use('/api/auth',      authRoutes);
-app.use('/api/estancias', estanciasRoutes);
-app.use('/api/ciclos',    ciclosRoutes);
-app.use('/api/vacas',     vacasRoutes);
-app.use('/api/historial', historialRoutes);
+app.use('/api/auth',        authRoutes);
+app.use('/api/estancias',   estanciasRoutes);
+app.use('/api/ciclos',      ciclosRoutes);
+app.use('/api/vacas',       vacasRoutes);
+app.use('/api/historial',   historialRoutes);
+app.use('/api/superadmin',  superadminRoutes);
 
 // ── 404 ───────────────────────────────────────────────────────
 app.use((req, res) => {

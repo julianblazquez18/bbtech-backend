@@ -30,4 +30,12 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-module.exports = { authMiddleware, requireAdmin };
+// Middleware para verificar rol superadmin
+function requireSuperadmin(req, res, next) {
+  if (req.user.rol !== 'superadmin') {
+    return res.status(403).json({ error: 'Acceso restringido.' });
+  }
+  next();
+}
+
+module.exports = { authMiddleware, requireAdmin, requireSuperadmin };
