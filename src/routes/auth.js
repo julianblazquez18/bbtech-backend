@@ -107,4 +107,57 @@ router.get('/me', authMiddleware, async (req, res) => {
   }
 });
 
+// POST /api/auth/registro — solicitud de acceso de una empresa nueva
+router.post('/registro', async (req, res) => {
+  try {
+    const { empresaNombre, emailContacto, adminNombre, adminEmail, adminPassword } = req.body;
+
+    // Validaciones básicas
+    if (!empresaNombre?.trim() || !adminNombre?.trim() || !adminEmail?.trim() || !adminPassword) {
+      return res.status(400).json({ error: 'Todos los campos son requeridos.' });
+    }
+    if (adminPassword.length < 8) {
+      return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres.' });
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(adminEmail.trim())) {
+      return res.status(400).json({ error: 'El email del administrador no es válido.' });
+    }
+
+    // Verificar que el email no esté en uso
+    const emailExists = await query(
+      'SELECT id FROM usuarios WHERE LOWER(email) = LOWER($1)',
+      [adminEmail.trim()]
+    );
+    if (emailExists.rowCount > 0) {
+      return res.status(400).json({ error: 'Ese email ya está registrado en el sistema.' });
+    }
+
+    // Crear tenant con aprobado = false
+    const tenantRes = await query(
+      `INSERT INTO tenants (nombre, empresa_nombre, email_contacto, aprobado)
+       VALUES ($1, $2, $3, false) RETURNING id`,
+      [empresaNombre.trim(), empresaNombre.trim(), (emailContacto || adminEmail).trim()]
+    );
+    const tenantId = tenantRes.rows[0].id;
+
+    // Crear usuario admin del tenant
+    const hash = await bcrypt.hash(adminPassword, 12);
+    await query(
+      `INSERT INTO usuarios (tenant_id, email, password_hash, nombre, rol)
+       VALUES ($1, $2, $3, $4, 'admin')`,
+      [tenantId, adminEmail.trim().toLowerCase(), hash, adminNombre.trim()]
+    );
+
+    res.status(201).json({
+      ok: true,
+      message: 'Solicitud registrada. Te avisaremos cuando tu cuenta sea aprobada.'
+    });
+
+  } catch (err) {
+    console.error('/auth/registro error:', err);
+    res.status(500).json({ error: 'Error al procesar el registro.' });
+  }
+});
+
 module.exports = router;
