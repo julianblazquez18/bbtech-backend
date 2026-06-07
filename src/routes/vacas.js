@@ -256,47 +256,20 @@ router.put('/:id/obs', async (req, res) => {
   }
 });
 
-// POST /api/vacas/mover — mover vacas entre ciclos con toda su info
-router.post('/mover', async (req, res) => {
+// DELETE /api/vacas/:id/descarte — quitar marca de descarte
+router.delete('/:id/descarte', async (req, res) => {
   try {
-    const { deCicloId, vacaIds, aCicloId } = req.body;
-    const tid = req.user.tenantId;
-
-    const destRes = await query(
-      'SELECT grupo_id FROM ciclos WHERE id = $1 AND tenant_id = $2 AND estado != $3',
-      [aCicloId, tid, 'cerrado']
+    const result = await query(
+      `UPDATE vacas
+       SET descarte = FALSE, descarte_estado = NULL, descarte_obs = '', descarte_fecha = NULL
+       WHERE id = $1 AND tenant_id = $2
+       RETURNING *`,
+      [req.params.id, req.user.tenantId]
     );
-    if (destRes.rowCount === 0) return res.status(404).json({ error: 'Ciclo destino no encontrado.' });
-    const destGrupoId = destRes.rows[0].grupo_id;
-
-    const vacasRes = await query(
-      'SELECT * FROM vacas WHERE id = ANY($1) AND ciclo_id = $2 AND tenant_id = $3',
-      [vacaIds, deCicloId, tid]
-    );
-
-    let movidas = 0;
-    await transaction(async (client) => {
-      for (const v of vacasRes.rows) {
-        // Actualizar ciclo y grupo actual (mantiene todos los datos)
-        await client.query(
-          'UPDATE vacas SET ciclo_id = $1, grupo_actual_id = $2 WHERE id = $3',
-          [aCicloId, destGrupoId, v.id]
-        );
-        // Registrar movimiento
-        await client.query(
-          `INSERT INTO movimientos
-             (tenant_id, vaca_id, de_ciclo_id, a_ciclo_id, de_grupo_id, a_grupo_id, tipo)
-           VALUES ($1,$2,$3,$4,$5,$6,'mover')`,
-          [tid, v.id, deCicloId, aCicloId, v.grupo_actual_id, destGrupoId]
-        );
-        movidas++;
-      }
-    });
-
-    res.json({ ok: true, count: movidas });
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Vaca no encontrada.' });
+    res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Error al mover vacas.' });
+    res.status(500).json({ error: 'Error al quitar descarte.' });
   }
 });
 
