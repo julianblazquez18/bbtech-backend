@@ -14,17 +14,15 @@ router.use(authMiddleware);
 // Aplica auto-fill downstream al actualizar etapa
 function autoFill(updates, etapa, estado) {
   if (etapa === 'entore' && estado === 'vacia') {
-    updates.parto_estado  = 'no_pario';   updates.parto_locked  = true;
-    updates.destete_estado= 'no_desteto'; updates.destete_locked= true;
+    updates.parto_estado  = 'no_aplica'; updates.parto_locked  = true;
+    updates.destete_estado= 'no_aplica'; updates.destete_locked= true;
   }
-  if (etapa === 'parto' && estado === 'no_pario') {
-    updates.destete_estado= 'no_desteto'; updates.destete_locked= true;
+  if (etapa === 'parto' && estado === 'aborto') {
+    updates.destete_estado= 'no_aplica'; updates.destete_locked= true;
   }
   if (etapa === 'entore' && estado === 'preniada') {
-    // Desbloquear parto y destete si venían bloqueados
     updates.parto_locked  = false;
     updates.destete_locked= false;
-    // Solo resetear si estaban en el estado bloqueado
     updates._unlockParto  = true;
     updates._unlockDestete= true;
   }
@@ -157,9 +155,9 @@ router.put('/:id/etapa', async (req, res) => {
     const vaca = vacaRes.rows[0];
 
     // Verificar bloqueos
-    if (etapa === 'parto'   && vaca.entore_estado === 'vacia')   return res.status(400).json({ error: 'Parto bloqueado: entore es Vacía.' });
-    if (etapa === 'destete' && vaca.entore_estado === 'vacia')   return res.status(400).json({ error: 'Destete bloqueado: entore es Vacía.' });
-    if (etapa === 'destete' && vaca.parto_estado  === 'no_pario') return res.status(400).json({ error: 'Destete bloqueado: No parió.' });
+    if (etapa === 'parto'   && vaca.entore_estado === 'vacia')  return res.status(400).json({ error: 'Parto bloqueado: entore es Vacía.' });
+    if (etapa === 'destete' && vaca.entore_estado === 'vacia')  return res.status(400).json({ error: 'Destete bloqueado: entore es Vacía.' });
+    if (etapa === 'destete' && vaca.destete_locked) return res.status(400).json({ error: 'Destete bloqueado.' });
 
     // Construir objeto de campos a actualizar — usando objeto para evitar duplicados
     const updates = {};
@@ -172,10 +170,10 @@ router.put('/:id/etapa', async (req, res) => {
     // Auto-fill downstream según la lógica de negocio
     if (etapa === 'entore') {
       if (estado === 'vacia') {
-        // Vacía → bloquear parto y destete
-        updates.parto_estado   = 'no_pario';
+        // Vacía → no aplica (no es aborto ni muerte, simplemente no corresponde)
+        updates.parto_estado   = 'no_aplica';
         updates.parto_locked   = true;
-        updates.destete_estado = 'no_desteto';
+        updates.destete_estado = 'no_aplica';
         updates.destete_locked = true;
       } else if (estado === 'preniada') {
         // Preniada → desbloquear parto/destete si estaban bloqueados
@@ -191,9 +189,9 @@ router.put('/:id/etapa', async (req, res) => {
     }
 
     if (etapa === 'parto') {
-      if (estado === 'no_pario') {
-        // No parió → bloquear destete
-        updates.destete_estado = 'no_desteto';
+      if (estado === 'aborto') {
+        // Aborto → destete no aplica (el ternero no llegó a nacer)
+        updates.destete_estado = 'no_aplica';
         updates.destete_locked = true;
       } else if (estado === 'pario' && vaca.destete_locked) {
         // Parió → desbloquear destete

@@ -12,20 +12,29 @@ router.use(authMiddleware);
 // ── HELPERS ───────────────────────────────────────────────────
 
 function computeStats(vacas) {
-  const total      = vacas.length;
-  const pct        = n => total > 0 ? ((n / total) * 100).toFixed(1) : '0.0';
-  const descartadas= vacas.filter(v => v.descarte).length;
-  const muerte     = vacas.filter(v => v.descarte && v.descarte_estado === 'muerte').length;
-  const feedlot    = vacas.filter(v => v.descarte && v.descarte_estado === 'feedlot').length;
-  const preniadas  = vacas.filter(v => v.entore_estado === 'preniada').length;
-  const vacias     = vacas.filter(v => v.entore_estado === 'vacia').length;
-  const parieron   = vacas.filter(v => v.parto_estado  === 'pario').length;
-  const destetaron = vacas.filter(v => v.destete_estado === 'desteto').length;
+  const total         = vacas.length;
+  const pctOf = (n, d) => d > 0 ? ((n / d) * 100).toFixed(1) : '0.0';
+  const descartadas   = vacas.filter(v => v.descarte).length;
+  const muerte        = vacas.filter(v => v.descarte && v.descarte_estado === 'muerte').length;
+  const rechazo       = vacas.filter(v => v.descarte && v.descarte_estado === 'rechazo').length;
+  const preniadas     = vacas.filter(v => v.entore_estado === 'preniada').length;
+  const vacias        = vacas.filter(v => v.entore_estado === 'vacia').length;
+  const parieron      = vacas.filter(v => v.parto_estado  === 'pario').length;
+  const abortaron     = vacas.filter(v => v.parto_estado  === 'aborto').length;
+  const destetaron    = vacas.filter(v => v.destete_estado === 'desteto').length;
+  const muerteTernero = vacas.filter(v => v.destete_estado === 'muerte_ternero').length;
   return {
-    total, descartadas, muerte, feedlot, preniadas, vacias, parieron, destetaron,
-    pctDescarte: pct(descartadas), pctMuerte: pct(muerte), pctFeedlot: pct(feedlot),
-    pctPrenez:   pct(preniadas),   pctVacias: pct(vacias),
-    pctParto:    pct(parieron),    pctDestete: pct(destetaron),
+    total, descartadas, muerte, rechazo,
+    preniadas, vacias, parieron, abortaron, destetaron, muerteTernero,
+    pctDescarte:      pctOf(descartadas, total),
+    pctMuerte:        pctOf(muerte, total),
+    pctRechazo:       pctOf(rechazo, total),
+    pctPrenez:        pctOf(preniadas, total),
+    pctVacias:        pctOf(vacias, total),
+    pctParto:         pctOf(parieron, preniadas),
+    pctAborto:        pctOf(abortaron, preniadas),
+    pctDestete:       pctOf(destetaron, parieron),
+    pctMuerteTernero: pctOf(muerteTernero, parieron),
   };
 }
 
