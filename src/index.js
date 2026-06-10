@@ -14,6 +14,7 @@ const vacasRoutes       = require('./routes/vacas');
 const historialRoutes   = require('./routes/historial');
 const superadminRoutes  = require('./routes/superadmin');
 const usuariosRoutes    = require('./routes/usuarios');
+const landingRoutes     = require('./routes/landing');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -46,6 +47,7 @@ app.use('/api/vacas',       vacasRoutes);
 app.use('/api/historial',   historialRoutes);
 app.use('/api/superadmin',  superadminRoutes);
 app.use('/api/usuarios',    usuariosRoutes);
+app.use('/api/landing',     landingRoutes);   // público — sin auth
 
 // ── 404 ───────────────────────────────────────────────────────
 app.use((req, res) => {

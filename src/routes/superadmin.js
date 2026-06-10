@@ -52,4 +52,17 @@ router.put('/tenants/:id/aprobar', async (req, res) => {
   }
 });
 
+// GET /api/superadmin/leads — lista todos los leads capturados desde la landing
+router.get('/leads', async (req, res) => {
+  try {
+    const result = await query(
+      'SELECT email, creado_en FROM leads ORDER BY creado_en DESC'
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('superadmin/leads:', err);
+    res.status(500).json({ error: 'Error al obtener leads.' });
+  }
+});
+
 module.exports = router;
