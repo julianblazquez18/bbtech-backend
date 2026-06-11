@@ -155,6 +155,7 @@ router.put('/:id/etapa', async (req, res) => {
     const vaca = vacaRes.rows[0];
 
     // Verificar bloqueos
+    if (vaca.descarte === true) return res.status(400).json({ error: 'Animal descartado: retirá el descarte antes de modificar etapas.' });
     if (etapa === 'parto'   && vaca.entore_estado === 'vacia')  return res.status(400).json({ error: 'Parto bloqueado: entore es Vacía.' });
     if (etapa === 'destete' && vaca.entore_estado === 'vacia')  return res.status(400).json({ error: 'Destete bloqueado: entore es Vacía.' });
     if (etapa === 'destete' && vaca.destete_locked) return res.status(400).json({ error: 'Destete bloqueado.' });

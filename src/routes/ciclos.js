@@ -220,6 +220,87 @@ router.post('/:id/finalizar', async (req, res) => {
   }
 });
 
+// POST /api/ciclos/:id/mover — mover vacas a otro ciclo (las quita del origen)
+router.post('/:id/mover', async (req, res) => {
+  try {
+    const { aCicloId, caravanas } = req.body;
+    const tid = req.user.tenantId;
+
+    if (!aCicloId || !Array.isArray(caravanas) || caravanas.length === 0) {
+      return res.status(400).json({ error: 'Faltan datos: aCicloId y caravanas requeridos.' });
+    }
+    if (req.params.id === aCicloId) {
+      return res.status(400).json({ error: 'El ciclo destino debe ser diferente al origen.' });
+    }
+
+    // Verificar ciclo destino
+    const destRes = await query(
+      'SELECT id, grupo_id FROM ciclos WHERE id = $1 AND tenant_id = $2 AND estado != $3',
+      [aCicloId, tid, 'cerrado']
+    );
+    if (destRes.rowCount === 0) return res.status(404).json({ error: 'Ciclo destino no encontrado.' });
+
+    // Obtener vacas a mover
+    const vacasRes = await query(
+      'SELECT * FROM vacas WHERE ciclo_id = $1 AND tenant_id = $2 AND caravana = ANY($3)',
+      [req.params.id, tid, caravanas]
+    );
+    if (vacasRes.rowCount === 0) {
+      return res.status(400).json({ error: 'No se encontraron las vacas indicadas.' });
+    }
+
+    const destGrupoId = destRes.rows[0].grupo_id;
+    let movidas = 0;
+    const duplicadas = [];
+
+    await transaction(async (client) => {
+      for (const v of vacasRes.rows) {
+        // Verificar que no existe ya en el ciclo destino
+        const dup = await client.query(
+          'SELECT id FROM vacas WHERE ciclo_id = $1 AND caravana = $2',
+          [aCicloId, v.caravana]
+        );
+        if (dup.rowCount > 0) { duplicadas.push(v.caravana); continue; }
+
+        // Insertar en ciclo destino conservando todos los datos del animal
+        await client.query(
+          `INSERT INTO vacas
+             (tenant_id, ciclo_id, caravana,
+              grupo_origen_id, grupo_actual_id,
+              entore_estado, entore_fecha,
+              parto_estado,  parto_fecha,  parto_locked,
+              destete_estado, destete_fecha, destete_locked,
+              descarte, descarte_estado, descarte_fecha, descarte_obs,
+              obs)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+          [
+            tid, aCicloId, v.caravana,
+            v.grupo_actual_id, destGrupoId,
+            v.entore_estado,  v.entore_fecha,
+            v.parto_estado,   v.parto_fecha,  v.parto_locked,
+            v.destete_estado, v.destete_fecha, v.destete_locked,
+            v.descarte,       v.descarte_estado, v.descarte_fecha, v.descarte_obs,
+            v.obs
+          ]
+        );
+
+        // Eliminar del ciclo origen
+        await client.query(
+          'DELETE FROM vacas WHERE id = $1',
+          [v.id]
+        );
+
+        movidas++;
+      }
+    });
+
+    res.json({ ok: true, count: movidas, duplicadas });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al mover vacas.' });
+  }
+});
+
 // POST /api/ciclos/:id/traspasar — traspasar vacas a otro ciclo
 router.post('/:id/traspasar', async (req, res) => {
   try {
@@ -250,6 +331,7 @@ router.post('/:id/traspasar', async (req, res) => {
 
     const destGrupoId = destRes.rows[0].grupo_id;
     let traspasadas = 0;
+    const duplicadas = [];
 
     await transaction(async (client) => {
       for (const v of vacasRes.rows) {
@@ -258,7 +340,7 @@ router.post('/:id/traspasar', async (req, res) => {
           'SELECT id FROM vacas WHERE ciclo_id = $1 AND caravana = $2',
           [aCicloId, v.caravana]
         );
-        if (dup.rowCount > 0) continue;  // skip duplicada
+        if (dup.rowCount > 0) { duplicadas.push(v.caravana); continue; }
 
         // Insertar en ciclo destino con datos en cero
         const newVaca = await client.query(
@@ -281,7 +363,7 @@ router.post('/:id/traspasar', async (req, res) => {
       }
     });
 
-    res.json({ ok: true, count: traspasadas });
+    res.json({ ok: true, count: traspasadas, duplicadas });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error al traspasar vacas.' });
