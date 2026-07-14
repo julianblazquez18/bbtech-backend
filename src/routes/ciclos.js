@@ -138,13 +138,36 @@ router.put('/:id', async (req, res) => {
 // DELETE /api/ciclos/:id — eliminar ciclo
 router.delete('/:id', async (req, res) => {
   try {
-    const result = await query(
-      'DELETE FROM ciclos WHERE id = $1 AND tenant_id = $2',
-      [req.params.id, req.user.tenantId]
+    const tid = req.user.tenantId;
+    const cicloId = req.params.id;
+
+    // Verificar que existe y pertenece al tenant antes de entrar a la transacción
+    const existe = await query(
+      'SELECT id FROM ciclos WHERE id = $1 AND tenant_id = $2',
+      [cicloId, tid]
     );
-    if (result.rowCount === 0) return res.status(404).json({ error: 'Ciclo no encontrado.' });
+    if (existe.rowCount === 0) return res.status(404).json({ error: 'Ciclo no encontrado.' });
+
+    await transaction(async (client) => {
+      // 1. Borrar movimientos que referencian este ciclo como origen o destino.
+      //    de_ciclo_id / a_ciclo_id no tienen ON DELETE CASCADE → RESTRICT por defecto,
+      //    por lo que bloquearían el DELETE del ciclo si no se limpian primero.
+      await client.query(
+        'DELETE FROM movimientos WHERE de_ciclo_id = $1 OR a_ciclo_id = $1',
+        [cicloId]
+      );
+
+      // 2. Eliminar el ciclo. Las vacas de este ciclo se eliminan por CASCADE
+      //    (ciclo_id ON DELETE CASCADE), y sus movimientos por vaca_id ON DELETE CASCADE.
+      await client.query(
+        'DELETE FROM ciclos WHERE id = $1 AND tenant_id = $2',
+        [cicloId, tid]
+      );
+    });
+
     res.json({ ok: true });
   } catch (err) {
+    console.error('delete ciclo:', err);
     res.status(500).json({ error: 'Error al eliminar ciclo.' });
   }
 });
