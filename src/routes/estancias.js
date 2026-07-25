@@ -75,14 +75,47 @@ router.put('/:id', async (req, res) => {
 // DELETE /api/estancias/:id — eliminar campo
 router.delete('/:id', async (req, res) => {
   try {
-    // ON DELETE CASCADE elimina grupos, ciclos y vacas automáticamente
-    const result = await query(
-      'DELETE FROM estancias WHERE id = $1 AND tenant_id = $2',
-      [req.params.id, req.user.tenantId]
-    );
+    const estanciaId = req.params.id;
+    const tid        = req.user.tenantId;
+
+    const result = await transaction(async (client) => {
+      // Obtener todos los grupos del campo para nullear sus FK en vacas
+      const grpRes = await client.query(
+        'SELECT id FROM grupos WHERE estancia_id = $1 AND tenant_id = $2',
+        [estanciaId, tid]
+      );
+      const grupoIds = grpRes.rows.map(r => r.id);
+
+      if (grupoIds.length > 0) {
+        await client.query(
+          `UPDATE vacas SET grupo_origen_id = NULL WHERE grupo_origen_id = ANY($1) AND tenant_id = $2`,
+          [grupoIds, tid]
+        );
+        await client.query(
+          `UPDATE vacas SET grupo_actual_id = NULL WHERE grupo_actual_id = ANY($1) AND tenant_id = $2`,
+          [grupoIds, tid]
+        );
+        await client.query(
+          `UPDATE movimientos SET de_grupo_id = NULL WHERE de_grupo_id = ANY($1) AND tenant_id = $2`,
+          [grupoIds, tid]
+        );
+        await client.query(
+          `UPDATE movimientos SET a_grupo_id = NULL WHERE a_grupo_id = ANY($1) AND tenant_id = $2`,
+          [grupoIds, tid]
+        );
+      }
+
+      // Borrar la estancia (CASCADE elimina grupos, ciclos y vacas en cascada)
+      return await client.query(
+        'DELETE FROM estancias WHERE id = $1 AND tenant_id = $2',
+        [estanciaId, tid]
+      );
+    });
+
     if (result.rowCount === 0) return res.status(404).json({ error: 'Campo no encontrado.' });
     res.json({ ok: true });
   } catch (err) {
+    console.error('Error eliminando estancia:', err);
     res.status(500).json({ error: 'Error al eliminar campo.' });
   }
 });
@@ -132,13 +165,39 @@ router.put('/:estanciaId/grupos/:id', async (req, res) => {
 // DELETE /api/estancias/:estanciaId/grupos/:id — eliminar grupo
 router.delete('/:estanciaId/grupos/:id', async (req, res) => {
   try {
-    const result = await query(
-      'DELETE FROM grupos WHERE id = $1 AND tenant_id = $2',
-      [req.params.id, req.user.tenantId]
-    );
+    const grupoId = req.params.id;
+    const tid     = req.user.tenantId;
+
+    const result = await transaction(async (client) => {
+      // Nullear referencias en vacas de otros ciclos (no tienen CASCADE)
+      await client.query(
+        `UPDATE vacas SET grupo_origen_id = NULL WHERE grupo_origen_id = $1 AND tenant_id = $2`,
+        [grupoId, tid]
+      );
+      await client.query(
+        `UPDATE vacas SET grupo_actual_id = NULL WHERE grupo_actual_id = $1 AND tenant_id = $2`,
+        [grupoId, tid]
+      );
+      // Limpiar movimientos que referencian este grupo
+      await client.query(
+        `UPDATE movimientos SET de_grupo_id = NULL WHERE de_grupo_id = $1 AND tenant_id = $2`,
+        [grupoId, tid]
+      );
+      await client.query(
+        `UPDATE movimientos SET a_grupo_id = NULL WHERE a_grupo_id = $1 AND tenant_id = $2`,
+        [grupoId, tid]
+      );
+      // Borrar el grupo (ciclos y sus vacas se van por CASCADE)
+      return await client.query(
+        `DELETE FROM grupos WHERE id = $1 AND tenant_id = $2`,
+        [grupoId, tid]
+      );
+    });
+
     if (result.rowCount === 0) return res.status(404).json({ error: 'Grupo no encontrado.' });
     res.json({ ok: true });
   } catch (err) {
+    console.error('Error eliminando grupo:', err);
     res.status(500).json({ error: 'Error al eliminar grupo.' });
   }
 });
