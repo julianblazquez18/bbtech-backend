@@ -133,13 +133,13 @@ router.get('/tipos', async (req, res) => {
 // POST /api/empleados/tipos (solo admin)
 router.post('/tipos', requireAdmin, async (req, res) => {
   try {
-    const { nombre, color, icono, orden, categoria } = req.body;
+    const { nombre, color, icono, orden, categoria, valor } = req.body;
     if (!nombre?.trim()) return res.status(400).json({ error: 'Nombre requerido.' });
     const result = await query(
-      `INSERT INTO tipos_asistencia (tenant_id, nombre, color, icono, orden, categoria)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      `INSERT INTO tipos_asistencia (tenant_id, nombre, color, icono, orden, categoria, valor)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
       [req.user.tenantId, nombre.trim(), color || '#6b7280',
-       icono || '•', orden || 0, categoria || 'presencia']
+       icono || '•', orden || 0, categoria || 'presencia', valor ?? 1]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -151,17 +151,18 @@ router.post('/tipos', requireAdmin, async (req, res) => {
 // PUT /api/empleados/tipos/:id (solo admin)
 router.put('/tipos/:id', requireAdmin, async (req, res) => {
   try {
-    const { nombre, color, icono, orden, categoria } = req.body;
+    const { nombre, color, icono, orden, categoria, valor } = req.body;
     const result = await query(
       `UPDATE tipos_asistencia SET
          nombre    = COALESCE($1, nombre),
          color     = COALESCE($2, color),
          icono     = COALESCE($3, icono),
          orden     = COALESCE($4, orden),
-         categoria = COALESCE($5, categoria)
-       WHERE id = $6 AND tenant_id = $7 RETURNING *`,
+         categoria = COALESCE($5, categoria),
+         valor     = COALESCE($6, valor)
+       WHERE id = $7 AND tenant_id = $8 RETURNING *`,
       [nombre || null, color || null, icono || null, orden ?? null,
-       categoria || null, req.params.id, req.user.tenantId]
+       categoria || null, valor ?? null, req.params.id, req.user.tenantId]
     );
     if (result.rowCount === 0) return res.status(404).json({ error: 'Tipo no encontrado.' });
     res.json(result.rows[0]);
