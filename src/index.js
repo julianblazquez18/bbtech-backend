@@ -46,6 +46,7 @@ app.use('/api/ciclos',      ciclosRoutes);
 app.use('/api/vacas',       vacasRoutes);
 app.use('/api/historial',   historialRoutes);
 app.use('/api/empleados',   require('./routes/empleados'));
+app.use('/api/agro',        require('./routes/agro'));
 app.use('/api/superadmin',  superadminRoutes);
 app.use('/api/usuarios',    usuariosRoutes);
 app.use('/api/landing',     landingRoutes);   // público — sin auth
