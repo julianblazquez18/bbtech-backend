@@ -219,19 +219,35 @@ router.post('/lotes/:loteId/ciclos', async (req, res) => {
   }
 });
 
-router.put('/ciclos/:id', requireAdmin, async (req, res) => {
+router.put('/ciclos/:id', async (req, res) => {
   try {
-    const { nombre } = req.body;
+    const { nombre, obs } = req.body;
     const result = await query(
-      `UPDATE agro_ciclos SET nombre=COALESCE($1,nombre)
-       WHERE id=$2 AND tenant_id=$3 RETURNING *`,
-      [nombre || null, req.params.id, tid(req)]
+      `UPDATE agro_ciclos
+         SET nombre=COALESCE($1,nombre),
+             obs=COALESCE($2,obs)
+       WHERE id=$3 AND tenant_id=$4 RETURNING *`,
+      [nombre || null, obs != null ? obs : null, req.params.id, tid(req)]
     );
     if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error al editar ciclo.' });
+  }
+});
+
+router.delete('/ciclos/:id', requireAdmin, async (req, res) => {
+  try {
+    const result = await query(
+      `DELETE FROM agro_ciclos WHERE id=$1 AND tenant_id=$2 RETURNING id`,
+      [req.params.id, tid(req)]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al eliminar ciclo.' });
   }
 });
 
@@ -263,7 +279,7 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
 
     if (tipo === 'siembra') {
       const ciclo = await query(
-        `SELECT cultivo, variedad FROM agro_ciclos WHERE id=$1`,
+        `SELECT cultivo, variedad, tipo FROM agro_ciclos WHERE id=$1`,
         [req.params.cicloId]
       );
       const c = ciclo.rows[0];
@@ -272,15 +288,16 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
           error: `Este ciclo ya tiene cultivo "${c.cultivo}". No podés mezclar cultivos.`
         });
       }
-      if (c.variedad && c.variedad !== variedad) {
+      // variedad aquí es el "Tipo" (Primera/Segunda) enviado desde el frontend
+      if (c.tipo && variedad && c.tipo !== variedad) {
         return res.status(400).json({
-          error: `Este ciclo ya tiene variedad "${c.variedad}". No podés mezclar variedades.`
+          error: `Este ciclo ya tiene tipo "${c.tipo}". No podés mezclar tipos.`
         });
       }
       if (!c.cultivo) {
         await query(
-          `UPDATE agro_ciclos SET cultivo=$1, variedad=$2 WHERE id=$3`,
-          [cultivo, variedad, req.params.cicloId]
+          `UPDATE agro_ciclos SET cultivo=$1, tipo=$2, variedad=$3 WHERE id=$4`,
+          [cultivo, variedad || null, obs || null, req.params.cicloId]
         );
       }
     }
@@ -299,6 +316,35 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error al guardar registro.' });
+  }
+});
+
+router.put('/registros/:id', async (req, res) => {
+  try {
+    const { fecha, hectareas, cultivo, tipo, variedad,
+            kilos, producto, cantidad_kg, obs } = req.body;
+    const result = await query(
+      `UPDATE agro_registros SET
+         fecha       = COALESCE($1, fecha),
+         hectareas   = COALESCE($2, hectareas),
+         cultivo     = COALESCE($3, cultivo),
+         tipo        = COALESCE($4, tipo),
+         variedad    = COALESCE($5, variedad),
+         toneladas   = COALESCE($6, toneladas),
+         producto    = COALESCE($7, producto),
+         cantidad_kg = COALESCE($8, cantidad_kg),
+         obs         = COALESCE($9, obs)
+       WHERE id=$10 AND tenant_id=$11 RETURNING *`,
+      [fecha||null, hectareas??null, cultivo||null,
+       tipo||null, variedad||null, kilos??null,
+       producto||null, cantidad_kg??null, obs||null,
+       req.params.id, tid(req)]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al editar registro.' });
   }
 });
 
@@ -420,6 +466,51 @@ router.post('/ciclos/:cicloId/cosechas', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error al guardar cosecha.' });
+  }
+});
+
+router.put('/cosechas/:id', async (req, res) => {
+  try {
+    const { fecha, hectareas, kilos, obs,
+            destino_tipo, destino_silo_id, destino_bolsa_id,
+            destino_camion_id, entidad_externa_id } = req.body;
+
+    let result;
+    if (destino_tipo) {
+      result = await query(
+        `UPDATE agro_cosechas SET
+           fecha              = COALESCE($1, fecha),
+           hectareas          = COALESCE($2, hectareas),
+           toneladas          = COALESCE($3, toneladas),
+           obs                = COALESCE($4, obs),
+           destino_tipo       = $5,
+           destino_silo_id    = $6,
+           destino_bolsa_id   = $7,
+           destino_camion_id  = $8,
+           entidad_externa_id = $9
+         WHERE id=$10 AND tenant_id=$11 RETURNING *`,
+        [fecha||null, hectareas??null, kilos??null, obs||null,
+         destino_tipo, destino_silo_id||null, destino_bolsa_id||null,
+         destino_camion_id||null, entidad_externa_id||null,
+         req.params.id, tid(req)]
+      );
+    } else {
+      result = await query(
+        `UPDATE agro_cosechas SET
+           fecha     = COALESCE($1, fecha),
+           hectareas = COALESCE($2, hectareas),
+           toneladas = COALESCE($3, toneladas),
+           obs       = COALESCE($4, obs)
+         WHERE id=$5 AND tenant_id=$6 RETURNING *`,
+        [fecha||null, hectareas??null, kilos??null,
+         obs||null, req.params.id, tid(req)]
+      );
+    }
+    if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al editar cosecha.' });
   }
 });
 
@@ -681,6 +772,25 @@ router.post('/bolsas/:id/mover', async (req, res) => {
 
 // ── CAMIONES ─────────────────────────────────────────────
 
+router.put('/movimientos-camion/:id', async (req, res) => {
+  try {
+    const { camion_id, entidad_externa_id } = req.body;
+    if (!camion_id) return res.status(400).json({ error: 'camion_id requerido.' });
+    const result = await query(
+      `UPDATE agro_movimientos_camion
+         SET camion_id          = $1,
+             entidad_externa_id = $2
+       WHERE id=$3 AND tenant_id=$4 RETURNING *`,
+      [camion_id, entidad_externa_id||null, req.params.id, tid(req)]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al editar movimiento.' });
+  }
+});
+
 router.get('/camiones/movimientos', async (req, res) => {
   try {
     const { mes, anio } = req.query;
@@ -828,6 +938,135 @@ router.delete('/entidades/:id', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error al eliminar entidad.' });
+  }
+});
+
+// ── CULTIVOS ──────────────────────────────────────────────
+
+router.get('/cultivos', async (req, res) => {
+  try {
+    await query(
+      `CREATE TABLE IF NOT EXISTS agro_cultivos (
+        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id  UUID NOT NULL,
+        nombre     TEXT NOT NULL,
+        creado_en  TIMESTAMPTZ DEFAULT NOW()
+      )`
+    );
+    const result = await query(
+      `SELECT * FROM agro_cultivos WHERE tenant_id=$1 ORDER BY nombre`,
+      [tid(req)]
+    );
+    if (!result.rows.length) {
+      const seeds = ['Soja', 'Maíz', 'Trigo', 'Sorgo', 'Girasol'];
+      for (const nombre of seeds) {
+        await query(
+          `INSERT INTO agro_cultivos (tenant_id, nombre) VALUES ($1,$2)`,
+          [tid(req), nombre]
+        );
+      }
+      const seeded = await query(
+        `SELECT * FROM agro_cultivos WHERE tenant_id=$1 ORDER BY nombre`,
+        [tid(req)]
+      );
+      return res.json(seeded.rows);
+    }
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al obtener cultivos.' });
+  }
+});
+
+router.post('/cultivos', requireAdmin, async (req, res) => {
+  try {
+    const { nombre } = req.body;
+    if (!nombre) return res.status(400).json({ error: 'Nombre requerido.' });
+    const result = await query(
+      `INSERT INTO agro_cultivos (tenant_id, nombre) VALUES ($1,$2) RETURNING *`,
+      [tid(req), nombre]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al crear cultivo.' });
+  }
+});
+
+router.delete('/cultivos/:id', requireAdmin, async (req, res) => {
+  try {
+    await query(
+      `DELETE FROM agro_cultivos WHERE id=$1 AND tenant_id=$2`,
+      [req.params.id, tid(req)]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al eliminar cultivo.' });
+  }
+});
+
+// ── TIPOS DE CULTIVO ──────────────────────────────────────
+
+router.get('/tipos-cultivo', async (req, res) => {
+  try {
+    await query(
+      `CREATE TABLE IF NOT EXISTS agro_tipos_cultivo (
+        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id  UUID NOT NULL,
+        nombre     TEXT NOT NULL,
+        creado_en  TIMESTAMPTZ DEFAULT NOW()
+      )`
+    );
+    const result = await query(
+      `SELECT * FROM agro_tipos_cultivo WHERE tenant_id=$1 ORDER BY nombre`,
+      [tid(req)]
+    );
+    if (!result.rows.length) {
+      for (const nombre of ['Primera', 'Segunda']) {
+        await query(
+          `INSERT INTO agro_tipos_cultivo (tenant_id, nombre) VALUES ($1,$2)`,
+          [tid(req), nombre]
+        );
+      }
+      const seeded = await query(
+        `SELECT * FROM agro_tipos_cultivo WHERE tenant_id=$1 ORDER BY nombre`,
+        [tid(req)]
+      );
+      return res.json(seeded.rows);
+    }
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al obtener tipos.' });
+  }
+});
+
+router.post('/tipos-cultivo', requireAdmin, async (req, res) => {
+  try {
+    const { nombre } = req.body;
+    if (!nombre) return res.status(400).json({ error: 'Nombre requerido.' });
+    const result = await query(
+      `INSERT INTO agro_tipos_cultivo (tenant_id, nombre) VALUES ($1,$2) RETURNING *`,
+      [tid(req), nombre]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al crear tipo.' });
+  }
+});
+
+router.delete('/tipos-cultivo/:id', requireAdmin, async (req, res) => {
+  try {
+    await query(
+      `DELETE FROM agro_tipos_cultivo WHERE id=$1 AND tenant_id=$2`,
+      [req.params.id, tid(req)]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al eliminar tipo.' });
   }
 });
 
