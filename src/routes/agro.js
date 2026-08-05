@@ -13,8 +13,8 @@ const tid = req => req.user.tenantId;
 
 async function calcToneladasSilo(siloId, tenantId) {
   const entradas = await query(
-    `SELECT COALESCE(SUM(toneladas),0) AS total
-     FROM agro_cosechas
+    `SELECT COALESCE(SUM(kilos),0) AS total
+     FROM agro_cosecha_asignaciones
      WHERE destino_silo_id=$1 AND tenant_id=$2`,
     [siloId, tenantId]
   );
@@ -24,13 +24,29 @@ async function calcToneladasSilo(siloId, tenantId) {
      WHERE origen_silo_id=$1 AND tenant_id=$2`,
     [siloId, tenantId]
   );
-  return parseFloat(entradas.rows[0].total) - parseFloat(salidas.rows[0].total);
+  const ajustes = await query(
+    `SELECT COALESCE(SUM(kilos),0) AS total
+     FROM agro_ajustes_silo
+     WHERE silo_id=$1 AND tenant_id=$2`,
+    [siloId, tenantId]
+  );
+  return Math.max(0,
+    parseFloat(entradas.rows[0].total)
+    + parseFloat(ajustes.rows[0].total)
+    - parseFloat(salidas.rows[0].total)
+  );
 }
 
 async function calcToneladasBolsa(bolsaId, tenantId) {
-  const entradas = await query(
-    `SELECT COALESCE(SUM(toneladas),0) AS total
-     FROM agro_cosechas
+  const bolsa = await query(
+    `SELECT toneladas_totales FROM agro_bolsas WHERE id=$1`,
+    [bolsaId]
+  );
+  const kilosIniciales = parseFloat(bolsa.rows[0]?.toneladas_totales || 0);
+
+  const asignaciones = await query(
+    `SELECT COALESCE(SUM(kilos),0) AS total
+     FROM agro_cosecha_asignaciones
      WHERE destino_bolsa_id=$1 AND tenant_id=$2`,
     [bolsaId, tenantId]
   );
@@ -40,7 +56,8 @@ async function calcToneladasBolsa(bolsaId, tenantId) {
      WHERE origen_bolsa_id=$1 AND tenant_id=$2`,
     [bolsaId, tenantId]
   );
-  return parseFloat(entradas.rows[0].total) - parseFloat(salidas.rows[0].total);
+  const entradas = kilosIniciales + parseFloat(asignaciones.rows[0].total);
+  return Math.max(0, entradas - parseFloat(salidas.rows[0].total));
 }
 
 // ── ESTABLECIMIENTOS ─────────────────────────────────────
@@ -114,7 +131,7 @@ router.get('/establecimientos/:estId/lotes', async (req, res) => {
     const result = await query(
       `SELECT * FROM agro_lotes
        WHERE establecimiento_id=$1 AND tenant_id=$2
-       ORDER BY nombre`,
+       ORDER BY orden ASC, nombre`,
       [req.params.estId, tid(req)]
     );
     res.json(result.rows);
@@ -167,6 +184,23 @@ router.delete('/lotes/:id', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error al eliminar lote.' });
+  }
+});
+
+router.put('/establecimientos/:estId/lotes/orden', requireAdmin, async (req, res) => {
+  try {
+    const { orden } = req.body;
+    if (!Array.isArray(orden)) return res.status(400).json({ error: 'orden requerido.' });
+    for (const item of orden) {
+      await query(
+        `UPDATE agro_lotes SET orden=$1 WHERE id=$2 AND tenant_id=$3`,
+        [item.orden, item.id, tid(req)]
+      );
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al reordenar.' });
   }
 });
 
@@ -302,6 +336,27 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
       }
     }
 
+    const loteInfoReg = await query(
+      `SELECT l.hectareas FROM agro_lotes l
+       JOIN agro_ciclos c ON c.lote_id = l.id
+       WHERE c.id=$1`,
+      [req.params.cicloId]
+    );
+    const maxHaReg = parseFloat(loteInfoReg.rows[0]?.hectareas || 0);
+    if (maxHaReg > 0 && hectareas) {
+      const yaReg = await query(
+        `SELECT COALESCE(SUM(hectareas),0) AS total
+         FROM agro_registros WHERE ciclo_id=$1 AND tipo=$2`,
+        [req.params.cicloId, tipo]
+      );
+      const totalHa = parseFloat(yaReg.rows[0].total) + parseFloat(hectareas);
+      if (totalHa > maxHaReg) {
+        return res.status(400).json({
+          error: `Las hectáreas de ${tipo} (${totalHa} ha) superan las del lote (${maxHaReg} ha). Máximo disponible: ${maxHaReg - parseFloat(yaReg.rows[0].total)} ha.`
+        });
+      }
+    }
+
     const result = await query(
       `INSERT INTO agro_registros
          (tenant_id, ciclo_id, tipo, fecha, hectareas,
@@ -393,7 +448,7 @@ router.post('/ciclos/:cicloId/cosechas', async (req, res) => {
             destino_silo_id, destino_bolsa_id,
             destino_camion_id, entidad_externa_id, obs } = req.body;
 
-    if (!['silo', 'bolsa', 'camion'].includes(destino_tipo)) {
+    if (destino_tipo && !['silo', 'bolsa', 'camion'].includes(destino_tipo)) {
       return res.status(400).json({ error: 'Destino inválido.' });
     }
 
@@ -418,6 +473,27 @@ router.post('/ciclos/:cicloId/cosechas', async (req, res) => {
           `UPDATE agro_silos SET cultivo_actual=$1 WHERE id=$2`,
           [cicloCultivo, destino_silo_id]
         );
+      }
+    }
+
+    const loteInfoCos = await query(
+      `SELECT l.hectareas FROM agro_lotes l
+       JOIN agro_ciclos c ON c.lote_id = l.id
+       WHERE c.id=$1`,
+      [req.params.cicloId]
+    );
+    const maxHaCos = parseFloat(loteInfoCos.rows[0]?.hectareas || 0);
+    if (maxHaCos > 0 && hectareas) {
+      const yaCos = await query(
+        `SELECT COALESCE(SUM(hectareas),0) AS total
+         FROM agro_cosechas WHERE ciclo_id=$1`,
+        [req.params.cicloId]
+      );
+      const totalHaCos = parseFloat(yaCos.rows[0].total) + parseFloat(hectareas);
+      if (totalHaCos > maxHaCos) {
+        return res.status(400).json({
+          error: `Las hectáreas de cosecha (${totalHaCos} ha) superan las del lote (${maxHaCos} ha). Máximo disponible: ${maxHaCos - parseFloat(yaCos.rows[0].total)} ha.`
+        });
       }
     }
 
@@ -514,6 +590,100 @@ router.put('/cosechas/:id', async (req, res) => {
   }
 });
 
+router.post('/cosechas/:id/asignar-destino', async (req, res) => {
+  try {
+    const { destino_tipo, destino_silo_id, destino_bolsa_id,
+            destino_camion_id, entidad_externa_id, kilos } = req.body;
+
+    if (!destino_tipo || !kilos || kilos <= 0) {
+      return res.status(400).json({ error: 'destino_tipo y kilos requeridos.' });
+    }
+
+    const cosecha = await query(
+      `SELECT c.*, ag.cultivo FROM agro_cosechas c
+       JOIN agro_ciclos ag ON ag.id = c.ciclo_id
+       WHERE c.id=$1 AND c.tenant_id=$2`,
+      [req.params.id, tid(req)]
+    );
+    if (!cosecha.rowCount) return res.status(404).json({ error: 'Cosecha no encontrada.' });
+
+    const c = cosecha.rows[0];
+
+    if (c.destino_tipo) {
+      // Cosecha ya tiene destino — crear asignación parcial adicional
+      const result = await query(
+        `INSERT INTO agro_cosechas
+           (tenant_id, ciclo_id, fecha, hectareas, toneladas,
+            destino_tipo, destino_silo_id, destino_bolsa_id,
+            destino_camion_id, entidad_externa_id)
+         VALUES ($1,$2,CURRENT_DATE,null,$3,$4,$5,$6,$7,$8)
+         RETURNING *`,
+        [tid(req), c.ciclo_id, kilos, destino_tipo,
+         destino_silo_id||null, destino_bolsa_id||null,
+         destino_camion_id||null, entidad_externa_id||null]
+      );
+      if (destino_tipo === 'bolsa' && destino_bolsa_id) {
+        await query(
+          `UPDATE agro_bolsas SET toneladas_totales = toneladas_totales + $1 WHERE id=$2`,
+          [kilos, destino_bolsa_id]
+        );
+      }
+      if (destino_tipo === 'camion' && destino_camion_id) {
+        await query(
+          `INSERT INTO agro_movimientos_camion
+             (tenant_id, camion_id, fecha, origen_tipo, origen_cosecha_id,
+              cultivo, toneladas, entidad_externa_id)
+           VALUES ($1,$2,CURRENT_DATE,'cosecha_directa',$3,$4,$5,$6)`,
+          [tid(req), destino_camion_id, result.rows[0].id,
+           c.cultivo||null, kilos, entidad_externa_id||null]
+        );
+      }
+      return res.json(result.rows[0]);
+    }
+
+    // Cosecha sin destino: actualizar la cosecha existente
+    const tonAsignar = Math.min(parseFloat(kilos), parseFloat(c.toneladas || 0));
+    await query(
+      `UPDATE agro_cosechas SET
+         destino_tipo=$1, destino_silo_id=$2, destino_bolsa_id=$3,
+         destino_camion_id=$4, entidad_externa_id=$5, toneladas=$6
+       WHERE id=$7 AND tenant_id=$8`,
+      [destino_tipo, destino_silo_id||null, destino_bolsa_id||null,
+       destino_camion_id||null, entidad_externa_id||null,
+       tonAsignar, req.params.id, tid(req)]
+    );
+    if (destino_tipo === 'silo' && destino_silo_id) {
+      await query(
+        `UPDATE agro_silos SET cultivo_actual=COALESCE(cultivo_actual,$1) WHERE id=$2`,
+        [c.cultivo||null, destino_silo_id]
+      );
+    }
+    if (destino_tipo === 'bolsa' && destino_bolsa_id) {
+      await query(
+        `UPDATE agro_bolsas SET toneladas_totales=toneladas_totales+$1 WHERE id=$2`,
+        [tonAsignar, destino_bolsa_id]
+      );
+    }
+    if (destino_tipo === 'camion' && destino_camion_id) {
+      await query(
+        `INSERT INTO agro_movimientos_camion
+           (tenant_id, camion_id, fecha, origen_tipo, origen_cosecha_id,
+            cultivo, toneladas, entidad_externa_id)
+         VALUES ($1,$2,CURRENT_DATE,'cosecha_directa',$3,$4,$5,$6)`,
+        [tid(req), destino_camion_id, req.params.id,
+         c.cultivo||null, tonAsignar, entidad_externa_id||null]
+      );
+    }
+    const updated = await query(
+      `SELECT * FROM agro_cosechas WHERE id=$1`, [req.params.id]
+    );
+    res.json(updated.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al asignar destino.' });
+  }
+});
+
 router.delete('/cosechas/:id', requireAdmin, async (req, res) => {
   try {
     await query(
@@ -527,12 +697,150 @@ router.delete('/cosechas/:id', requireAdmin, async (req, res) => {
   }
 });
 
+// ── ASIGNACIONES DE COSECHA ──────────────────────────────
+
+router.get('/ciclos/:cicloId/asignaciones', async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT a.*,
+         s.nombre   AS silo_nombre,
+         b.nombre   AS bolsa_nombre,
+         cam.nombre AS camion_nombre,
+         ext.nombre AS entidad_nombre
+       FROM agro_cosecha_asignaciones a
+       LEFT JOIN agro_silos s              ON s.id = a.destino_silo_id
+       LEFT JOIN agro_bolsas b             ON b.id = a.destino_bolsa_id
+       LEFT JOIN agro_camiones cam         ON cam.id = a.destino_camion_id
+       LEFT JOIN agro_entidades_externas ext ON ext.id = a.entidad_externa_id
+       WHERE a.ciclo_id=$1 AND a.tenant_id=$2
+       ORDER BY a.creado_en ASC`,
+      [req.params.cicloId, tid(req)]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al obtener asignaciones.' });
+  }
+});
+
+router.post('/ciclos/:cicloId/asignaciones', async (req, res) => {
+  try {
+    const { kilos, destino_tipo, destino_silo_id, destino_bolsa_id,
+            destino_camion_id, entidad_externa_id } = req.body;
+
+    if (!kilos || kilos <= 0 || !destino_tipo) {
+      return res.status(400).json({ error: 'kilos y destino_tipo requeridos.' });
+    }
+    const TIPOS_VALIDOS = ['silo','bolsa','camion','siembra','externo'];
+    if (!TIPOS_VALIDOS.includes(destino_tipo)) {
+      return res.status(400).json({ error: 'Tipo de destino inválido.' });
+    }
+
+    const totalCosechado = await query(
+      `SELECT COALESCE(SUM(toneladas),0) AS total
+       FROM agro_cosechas WHERE ciclo_id=$1 AND tenant_id=$2`,
+      [req.params.cicloId, tid(req)]
+    );
+    const totalAsignado = await query(
+      `SELECT COALESCE(SUM(kilos),0) AS total
+       FROM agro_cosecha_asignaciones WHERE ciclo_id=$1 AND tenant_id=$2`,
+      [req.params.cicloId, tid(req)]
+    );
+    const disponible = parseFloat(totalCosechado.rows[0].total)
+                     - parseFloat(totalAsignado.rows[0].total);
+
+    if (parseFloat(kilos) > disponible) {
+      return res.status(400).json({
+        error: `Solo hay ${disponible} kg disponibles para asignar.`
+      });
+    }
+
+    const result = await query(
+      `INSERT INTO agro_cosecha_asignaciones
+         (tenant_id, ciclo_id, fecha, kilos, destino_tipo,
+          destino_silo_id, destino_bolsa_id,
+          destino_camion_id, entidad_externa_id)
+       VALUES ($1,$2,CURRENT_DATE,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [tid(req), req.params.cicloId, kilos, destino_tipo,
+       destino_silo_id||null, destino_bolsa_id||null,
+       destino_camion_id||null, entidad_externa_id||null]
+    );
+
+    if (destino_tipo === 'silo' && destino_silo_id) {
+      const cicloInfo = await query(
+        `SELECT cultivo FROM agro_ciclos WHERE id=$1`, [req.params.cicloId]
+      );
+      const cultivo = cicloInfo.rows[0]?.cultivo;
+      const siloInfo = await query(
+        `SELECT cultivo_actual FROM agro_silos WHERE id=$1`, [destino_silo_id]
+      );
+      const siloCult = siloInfo.rows[0]?.cultivo_actual;
+      if (siloCult && cultivo && siloCult !== cultivo) {
+        return res.status(400).json({
+          error: `El silo ya tiene "${siloCult}". No podés mezclar cultivos.`
+        });
+      }
+      if (!siloCult && cultivo) {
+        await query(
+          `UPDATE agro_silos SET cultivo_actual=$1 WHERE id=$2`,
+          [cultivo, destino_silo_id]
+        );
+      }
+    }
+    if (destino_tipo === 'camion' && destino_camion_id) {
+      const cicloInfo = await query(
+        `SELECT cultivo FROM agro_ciclos WHERE id=$1`, [req.params.cicloId]
+      );
+      await query(
+        `INSERT INTO agro_movimientos_camion
+           (tenant_id, camion_id, fecha, origen_tipo,
+            cultivo, toneladas, entidad_externa_id)
+         VALUES ($1,$2,CURRENT_DATE,'cosecha_asignada',$3,$4,$5)`,
+        [tid(req), destino_camion_id,
+         cicloInfo.rows[0]?.cultivo||null,
+         kilos, entidad_externa_id||null]
+      );
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al crear asignación.' });
+  }
+});
+
+router.delete('/asignaciones/:id', requireAdmin, async (req, res) => {
+  try {
+    const asig = await query(
+      `SELECT * FROM agro_cosecha_asignaciones WHERE id=$1 AND tenant_id=$2`,
+      [req.params.id, tid(req)]
+    );
+    if (!asig.rowCount) return res.status(404).json({ error: 'No encontrada.' });
+    const a = asig.rows[0];
+
+    if (a.destino_tipo === 'bolsa' && a.destino_bolsa_id) {
+      await query(
+        `UPDATE agro_bolsas SET toneladas_totales=GREATEST(0,toneladas_totales-$1)
+         WHERE id=$2`, [a.kilos, a.destino_bolsa_id]
+      );
+    }
+
+    await query(
+      `DELETE FROM agro_cosecha_asignaciones WHERE id=$1`, [req.params.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al eliminar asignación.' });
+  }
+});
+
 // ── SILOS ────────────────────────────────────────────────
 
 router.get('/silos/resumen', async (req, res) => {
   try {
     const silos = await query(
-      `SELECT * FROM agro_silos WHERE tenant_id=$1 ORDER BY nombre`,
+      `SELECT * FROM agro_silos WHERE tenant_id=$1 ORDER BY orden ASC, nombre`,
       [tid(req)]
     );
     const result = await Promise.all(silos.rows.map(async s => {
@@ -556,7 +864,7 @@ router.get('/silos/resumen', async (req, res) => {
 router.get('/silos', async (req, res) => {
   try {
     const silos = await query(
-      `SELECT * FROM agro_silos WHERE tenant_id=$1 ORDER BY nombre`,
+      `SELECT * FROM agro_silos WHERE tenant_id=$1 ORDER BY orden ASC, nombre`,
       [tid(req)]
     );
     const result = await Promise.all(silos.rows.map(async s => ({
@@ -586,6 +894,23 @@ router.post('/silos', requireAdmin, async (req, res) => {
   }
 });
 
+router.put('/silos/orden', requireAdmin, async (req, res) => {
+  try {
+    const { orden } = req.body;
+    if (!Array.isArray(orden)) return res.status(400).json({ error: 'orden requerido.' });
+    for (const item of orden) {
+      await query(
+        `UPDATE agro_silos SET orden=$1 WHERE id=$2 AND tenant_id=$3`,
+        [item.orden, item.id, tid(req)]
+      );
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al reordenar silos.' });
+  }
+});
+
 router.put('/silos/:id', requireAdmin, async (req, res) => {
   try {
     const { nombre, capacidad_ton } = req.body;
@@ -606,33 +931,63 @@ router.put('/silos/:id', requireAdmin, async (req, res) => {
 
 router.post('/silos/:id/mover', async (req, res) => {
   try {
-    const { camion_id, fecha, toneladas, entidad_externa_id, obs } = req.body;
-    if (!camion_id || !toneladas) {
-      return res.status(400).json({ error: 'camion_id y toneladas requeridos.' });
+    const { camion_id, fecha, toneladas, entidad_externa_id,
+            destino_categoria, destino_bolsa_id } = req.body;
+    if (!toneladas) return res.status(400).json({ error: 'toneladas requerido.' });
+    if (!destino_categoria) {
+      return res.status(400).json({ error: 'destino_categoria requerido.' });
     }
+
     const silo = await query(
       `SELECT * FROM agro_silos WHERE id=$1 AND tenant_id=$2`,
       [req.params.id, tid(req)]
     );
     if (!silo.rowCount) return res.status(404).json({ error: 'Silo no encontrado.' });
+    const s = silo.rows[0];
 
     const tonActuales = await calcToneladasSilo(req.params.id, tid(req));
     if (toneladas > tonActuales) {
       return res.status(400).json({
-        error: `Solo hay ${tonActuales} toneladas disponibles en el silo.`
+        error: `Solo hay ${tonActuales} kg disponibles en el silo.`
       });
     }
 
-    const result = await query(
+    if (destino_categoria === 'bolsa' && destino_bolsa_id) {
+      const bolsa = await query(
+        `SELECT * FROM agro_bolsas WHERE id=$1 AND tenant_id=$2`,
+        [destino_bolsa_id, tid(req)]
+      );
+      if (!bolsa.rowCount) return res.status(404).json({ error: 'Bolsa no encontrada.' });
+      const b = bolsa.rows[0];
+      if (b.cultivo && s.cultivo_actual && b.cultivo !== s.cultivo_actual) {
+        return res.status(400).json({
+          error: `La bolsa tiene "${b.cultivo}" y el silo tiene "${s.cultivo_actual}". No se pueden mezclar.`
+        });
+      }
+      if (!b.cultivo && s.cultivo_actual) {
+        await query(
+          `UPDATE agro_bolsas SET cultivo=$1 WHERE id=$2`,
+          [s.cultivo_actual, destino_bolsa_id]
+        );
+      }
+      await query(
+        `UPDATE agro_bolsas SET toneladas_totales=toneladas_totales+$1 WHERE id=$2`,
+        [toneladas, destino_bolsa_id]
+      );
+    }
+
+    await query(
       `INSERT INTO agro_movimientos_camion
-         (tenant_id, camion_id, fecha, origen_tipo,
-          origen_silo_id, cultivo, toneladas,
-          entidad_externa_id, obs)
-       VALUES ($1,$2,$3,'silo',$4,$5,$6,$7,$8) RETURNING *`,
-      [tid(req), camion_id,
-       fecha || new Date().toISOString().slice(0, 10),
-       req.params.id, silo.rows[0].cultivo_actual,
-       toneladas, entidad_externa_id || null, obs || '']
+         (tenant_id, camion_id, fecha, origen_tipo, origen_silo_id,
+          cultivo, toneladas, entidad_externa_id, destino_categoria)
+       VALUES ($1,$2,$3,'silo',$4,$5,$6,$7,$8)`,
+      [tid(req),
+       destino_categoria === 'camion' ? camion_id : null,
+       fecha || new Date().toISOString().slice(0,10),
+       req.params.id, s.cultivo_actual,
+       toneladas,
+       destino_categoria === 'camion' ? entidad_externa_id||null : null,
+       destino_categoria]
     );
 
     const tonRestantes = tonActuales - toneladas;
@@ -643,10 +998,44 @@ router.post('/silos/:id/mover', async (req, res) => {
       );
     }
 
-    res.json(result.rows[0]);
+    res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error al mover silo.' });
+  }
+});
+
+router.post('/silos/:id/ajustar', requireAdmin, async (req, res) => {
+  try {
+    const { cultivo_nuevo, kilos_ajuste, obs } = req.body;
+    const silo = await query(
+      `SELECT * FROM agro_silos WHERE id=$1 AND tenant_id=$2`,
+      [req.params.id, tid(req)]
+    );
+    if (!silo.rowCount) return res.status(404).json({ error: 'Silo no encontrado.' });
+    const s = silo.rows[0];
+
+    await query(
+      `INSERT INTO agro_ajustes_silo
+         (tenant_id, silo_id, tipo, kilos, cultivo_anterior, cultivo_nuevo, obs)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [tid(req), req.params.id,
+       cultivo_nuevo && cultivo_nuevo !== s.cultivo_actual ? 'cambio_cultivo' : 'ajuste',
+       kilos_ajuste || 0,
+       s.cultivo_actual, cultivo_nuevo || s.cultivo_actual, obs || '']
+    );
+
+    if (cultivo_nuevo && cultivo_nuevo !== s.cultivo_actual) {
+      await query(
+        `UPDATE agro_silos SET cultivo_actual=$1 WHERE id=$2`,
+        [cultivo_nuevo || null, req.params.id]
+      );
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al ajustar silo.' });
   }
 });
 
@@ -656,15 +1045,12 @@ router.get('/bolsas/por-establecimiento', async (req, res) => {
   try {
     const result = await query(
       `SELECT b.*,
-         c.nombre  AS ciclo_nombre,
-         c.cultivo AS ciclo_cultivo,
-         l.nombre  AS lote_nombre,
-         l.id      AS lote_id,
-         e.nombre  AS establecimiento_nombre,
-         e.id      AS establecimiento_id
+         l.nombre AS lote_nombre,
+         l.id     AS lote_id,
+         e.nombre AS establecimiento_nombre,
+         e.id     AS establecimiento_id
        FROM agro_bolsas b
-       JOIN agro_ciclos c             ON c.id = b.ciclo_id
-       JOIN agro_lotes l              ON l.id = c.lote_id
+       JOIN agro_lotes l              ON l.id = b.lote_id
        JOIN agro_establecimientos e   ON e.id = l.establecimiento_id
        WHERE b.tenant_id=$1 AND b.cerrada=FALSE
        ORDER BY e.nombre, l.nombre, b.creado_en`,
@@ -684,9 +1070,10 @@ router.get('/bolsas/por-establecimiento', async (req, res) => {
 router.get('/ciclos/:cicloId/bolsas', async (req, res) => {
   try {
     const bolsas = await query(
-      `SELECT * FROM agro_bolsas
-       WHERE ciclo_id=$1 AND tenant_id=$2
-       ORDER BY creado_en ASC`,
+      `SELECT b.* FROM agro_bolsas b
+       JOIN agro_ciclos c ON c.lote_id = b.lote_id
+       WHERE c.id=$1 AND b.tenant_id=$2
+       ORDER BY b.creado_en ASC`,
       [req.params.cicloId, tid(req)]
     );
     const result = await Promise.all(bolsas.rows.map(async b => ({
@@ -700,20 +1087,24 @@ router.get('/ciclos/:cicloId/bolsas', async (req, res) => {
   }
 });
 
-router.post('/ciclos/:cicloId/bolsas', async (req, res) => {
+router.post('/bolsas', async (req, res) => {
   try {
-    const { nombre } = req.body;
-    const ciclo = await query(
-      `SELECT cultivo, variedad FROM agro_ciclos WHERE id=$1`,
-      [req.params.cicloId]
+    const { lote_id, nombre, cultivo, kilos, tipo, variedad } = req.body;
+    if (!lote_id) return res.status(400).json({ error: 'lote_id requerido.' });
+    const lote = await query(
+      `SELECT * FROM agro_lotes WHERE id=$1 AND tenant_id=$2`,
+      [lote_id, tid(req)]
     );
-    const c = ciclo.rows[0];
+    if (!lote.rowCount) return res.status(404).json({ error: 'Lote no encontrado.' });
+    const kgNum = kilos ? parseFloat(kilos) : null;
     const result = await query(
       `INSERT INTO agro_bolsas
-         (tenant_id, ciclo_id, nombre, cultivo, variedad, fecha_inicio)
-       VALUES ($1,$2,$3,$4,$5,CURRENT_DATE) RETURNING *`,
-      [tid(req), req.params.cicloId,
-       nombre || 'Bolsa nueva', c?.cultivo || null, c?.variedad || null]
+         (tenant_id, lote_id, nombre, cultivo, tipo, variedad,
+          toneladas_totales, fecha_inicio)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,CURRENT_DATE) RETURNING *`,
+      [tid(req), lote_id, nombre || 'Bolsa nueva',
+       cultivo || null, tipo || null, variedad || null,
+       kgNum || 0]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -724,9 +1115,11 @@ router.post('/ciclos/:cicloId/bolsas', async (req, res) => {
 
 router.post('/bolsas/:id/mover', async (req, res) => {
   try {
-    const { camion_id, fecha, toneladas, entidad_externa_id, obs } = req.body;
-    if (!camion_id || !toneladas) {
-      return res.status(400).json({ error: 'camion_id y toneladas requeridos.' });
+    const { camion_id, fecha, toneladas, entidad_externa_id,
+            destino_categoria, destino_silo_id } = req.body;
+    if (!toneladas) return res.status(400).json({ error: 'toneladas requerido.' });
+    if (!destino_categoria) {
+      return res.status(400).json({ error: 'destino_categoria requerido.' });
     }
 
     const bolsa = await query(
@@ -734,36 +1127,63 @@ router.post('/bolsas/:id/mover', async (req, res) => {
       [req.params.id, tid(req)]
     );
     if (!bolsa.rowCount) return res.status(404).json({ error: 'Bolsa no encontrada.' });
+    const b = bolsa.rows[0];
 
     const tonActuales = await calcToneladasBolsa(req.params.id, tid(req));
     if (toneladas > tonActuales) {
       return res.status(400).json({
-        error: `Solo hay ${tonActuales} toneladas disponibles en la bolsa.`
+        error: `Solo hay ${tonActuales} kg disponibles en la bolsa.`
       });
     }
 
-    const result = await query(
+    if (destino_categoria === 'silo' && destino_silo_id) {
+      const silo = await query(
+        `SELECT * FROM agro_silos WHERE id=$1 AND tenant_id=$2`,
+        [destino_silo_id, tid(req)]
+      );
+      if (!silo.rowCount) return res.status(404).json({ error: 'Silo no encontrado.' });
+      const s = silo.rows[0];
+      if (s.cultivo_actual && b.cultivo && s.cultivo_actual !== b.cultivo) {
+        return res.status(400).json({
+          error: `El silo tiene "${s.cultivo_actual}" y la bolsa tiene "${b.cultivo}". No se pueden mezclar.`
+        });
+      }
+      await query(
+        `INSERT INTO agro_ajustes_silo
+           (tenant_id, silo_id, tipo, kilos, cultivo_nuevo, obs)
+         VALUES ($1,$2,'ajuste',$3,$4,'Recibido desde silo bolsa')`,
+        [tid(req), destino_silo_id, toneladas, b.cultivo||null]
+      );
+      if (!s.cultivo_actual && b.cultivo) {
+        await query(
+          `UPDATE agro_silos SET cultivo_actual=$1 WHERE id=$2`,
+          [b.cultivo, destino_silo_id]
+        );
+      }
+    }
+
+    await query(
       `INSERT INTO agro_movimientos_camion
-         (tenant_id, camion_id, fecha, origen_tipo,
-          origen_bolsa_id, cultivo, variedad,
-          toneladas, entidad_externa_id, obs)
-       VALUES ($1,$2,$3,'bolsa',$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [tid(req), camion_id,
-       fecha || new Date().toISOString().slice(0, 10),
-       req.params.id,
-       bolsa.rows[0].cultivo, bolsa.rows[0].variedad,
-       toneladas, entidad_externa_id || null, obs || '']
+         (tenant_id, camion_id, fecha, origen_tipo, origen_bolsa_id,
+          cultivo, variedad, toneladas, entidad_externa_id, destino_categoria)
+       VALUES ($1,$2,$3,'bolsa',$4,$5,$6,$7,$8,$9)`,
+      [tid(req),
+       destino_categoria === 'camion' ? camion_id : null,
+       fecha || new Date().toISOString().slice(0,10),
+       req.params.id, b.cultivo, b.tipo,
+       toneladas,
+       destino_categoria === 'camion' ? entidad_externa_id||null : null,
+       destino_categoria]
     );
 
     const tonRestantes = tonActuales - toneladas;
     if (tonRestantes <= 0) {
       await query(
-        `UPDATE agro_bolsas SET cerrada=TRUE WHERE id=$1`,
-        [req.params.id]
+        `UPDATE agro_bolsas SET cerrada=TRUE WHERE id=$1`, [req.params.id]
       );
     }
 
-    res.json(result.rows[0]);
+    res.json({ ok: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error al mover bolsa.' });
@@ -804,12 +1224,16 @@ router.get('/camiones/movimientos', async (req, res) => {
          cam.nombre AS camion_nombre,
          ext.nombre AS entidad_nombre,
          s.nombre   AS silo_nombre,
-         b.nombre   AS bolsa_nombre
+         b.nombre   AS bolsa_nombre,
+         l.nombre   AS lote_nombre,
+         e.nombre   AS establecimiento_nombre
        FROM agro_movimientos_camion m
-       JOIN agro_camiones cam            ON cam.id = m.camion_id
-       LEFT JOIN agro_entidades_externas ext ON ext.id = m.entidad_externa_id
-       LEFT JOIN agro_silos s            ON s.id = m.origen_silo_id
-       LEFT JOIN agro_bolsas b           ON b.id = m.origen_bolsa_id
+       JOIN agro_camiones cam                ON cam.id = m.camion_id
+       LEFT JOIN agro_entidades_externas ext  ON ext.id = m.entidad_externa_id
+       LEFT JOIN agro_silos s                 ON s.id = m.origen_silo_id
+       LEFT JOIN agro_bolsas b                ON b.id = m.origen_bolsa_id
+       LEFT JOIN agro_lotes l                 ON l.id = b.lote_id
+       LEFT JOIN agro_establecimientos e      ON e.id = l.establecimiento_id
        WHERE m.tenant_id=$1 AND m.fecha BETWEEN $2 AND $3
        ORDER BY m.fecha DESC, cam.nombre`,
       [tid(req), desde, hasta]
