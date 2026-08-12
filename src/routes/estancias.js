@@ -22,7 +22,18 @@ router.get('/', async (req, res) => {
       [tid]
     );
     const grpRes = await query(
-      'SELECT * FROM grupos WHERE tenant_id = $1 ORDER BY orden, nombre',
+      `SELECT g.*,
+         (SELECT COUNT(DISTINCT v.id)
+          FROM vacas v
+          JOIN ciclos c ON c.id = v.ciclo_id
+          WHERE c.grupo_id = g.id
+            AND c.tenant_id = g.tenant_id
+            AND c.estado != 'cerrado'
+            AND v.tenant_id = g.tenant_id
+         ) AS vaca_count_unico
+       FROM grupos g
+       WHERE g.tenant_id = $1
+       ORDER BY g.orden, g.nombre`,
       [tid]
     );
 
