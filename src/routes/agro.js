@@ -30,11 +30,19 @@ async function calcToneladasSilo(siloId, tenantId) {
      WHERE silo_id=$1 AND tenant_id=$2`,
     [siloId, tenantId]
   );
-  return Math.max(0,
+  const total = Math.max(0,
     parseFloat(entradas.rows[0].total)
     + parseFloat(ajustes.rows[0].total)
     - parseFloat(salidas.rows[0].total)
   );
+  if (total === 0) {
+    await query(
+      `UPDATE agro_silos SET cultivo_actual=NULL
+       WHERE id=$1 AND tenant_id=$2 AND cultivo_actual IS NOT NULL`,
+      [siloId, tenantId]
+    );
+  }
+  return total;
 }
 
 async function calcToneladasBolsa(bolsaId, tenantId) {
@@ -845,18 +853,33 @@ router.get('/silos/resumen', async (req, res) => {
     );
     const result = await Promise.all(silos.rows.map(async s => {
       const ton = await calcToneladasSilo(s.id, tid(req));
+      const caps = await query(
+        `SELECT cultivo, capacidad_kg FROM agro_silo_capacidades
+         WHERE silo_id=$1 AND tenant_id=$2 ORDER BY cultivo`,
+        [s.id, tid(req)]
+      );
+      const cultActual   = ton === 0 ? null : s.cultivo_actual;
+      const capCultivo   = cultActual
+        ? caps.rows.find(c => c.cultivo === cultActual)?.capacidad_kg
+        : null;
+      const capMax       = caps.rows.length > 0
+        ? Math.max(...caps.rows.map(c => parseFloat(c.capacidad_kg || 0)))
+        : 0;
+      const capEfectiva  = parseFloat(capCultivo || capMax || s.capacidad_ton || 0);
       return {
         ...s,
+        cultivo_actual:     cultActual,
         toneladas_actuales: ton,
-        toneladas_libres:   Math.max(0, s.capacidad_ton - ton),
-        pct_ocupado: s.capacidad_ton > 0
-          ? Math.round((ton / s.capacidad_ton) * 100)
-          : 0,
+        toneladas_libres:   capEfectiva > 0 ? Math.max(0, capEfectiva - ton) : null,
+        pct_ocupado:        capEfectiva > 0 ? Math.round((ton / capEfectiva) * 100) : null,
+        disponible:         ton === 0,
+        capacidades:        caps.rows,
+        capacidad_efectiva: capEfectiva,
       };
     }));
     res.json(result);
   } catch (err) {
-    console.error(err);
+    console.error('RESUMEN ERROR:', err.message, err.stack);
     res.status(500).json({ error: 'Error al obtener resumen de silos.' });
   }
 });
@@ -880,13 +903,26 @@ router.get('/silos', async (req, res) => {
 
 router.post('/silos', requireAdmin, async (req, res) => {
   try {
-    const { nombre, capacidad_ton } = req.body;
+    const { nombre, capacidades } = req.body;
     if (!nombre?.trim()) return res.status(400).json({ error: 'Nombre requerido.' });
     const result = await query(
-      `INSERT INTO agro_silos (tenant_id, nombre, capacidad_ton)
-       VALUES ($1,$2,$3) RETURNING *`,
-      [tid(req), nombre.trim(), capacidad_ton || 0]
+      `INSERT INTO agro_silos (tenant_id, nombre) VALUES ($1,$2) RETURNING *`,
+      [tid(req), nombre.trim()]
     );
+    if (Array.isArray(capacidades)) {
+      for (const cap of capacidades) {
+        if (cap.cultivo && parseFloat(cap.capacidad_kg) > 0) {
+          await query(
+            `INSERT INTO agro_silo_capacidades
+               (tenant_id, silo_id, cultivo, capacidad_kg)
+             VALUES ($1,$2,$3,$4)
+             ON CONFLICT (silo_id, cultivo)
+             DO UPDATE SET capacidad_kg=$4`,
+            [tid(req), result.rows[0].id, cap.cultivo, cap.capacidad_kg]
+          );
+        }
+      }
+    }
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -913,15 +949,36 @@ router.put('/silos/orden', requireAdmin, async (req, res) => {
 
 router.put('/silos/:id', requireAdmin, async (req, res) => {
   try {
-    const { nombre, capacidad_ton } = req.body;
+    const { nombre, capacidades } = req.body;
     const result = await query(
-      `UPDATE agro_silos SET
-         nombre=COALESCE($1,nombre),
-         capacidad_ton=COALESCE($2,capacidad_ton)
-       WHERE id=$3 AND tenant_id=$4 RETURNING *`,
-      [nombre || null, capacidad_ton ?? null, req.params.id, tid(req)]
+      `UPDATE agro_silos SET nombre=COALESCE($1,nombre)
+       WHERE id=$2 AND tenant_id=$3 RETURNING *`,
+      [nombre || null, req.params.id, tid(req)]
     );
     if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
+    if (Array.isArray(capacidades)) {
+      for (const cap of capacidades) {
+        if (cap.cultivo) {
+          const kg = parseFloat(cap.capacidad_kg || 0);
+          if (kg > 0) {
+            await query(
+              `INSERT INTO agro_silo_capacidades
+                 (tenant_id, silo_id, cultivo, capacidad_kg)
+               VALUES ($1,$2,$3,$4)
+               ON CONFLICT (silo_id, cultivo)
+               DO UPDATE SET capacidad_kg=$4`,
+              [tid(req), req.params.id, cap.cultivo, kg]
+            );
+          } else {
+            await query(
+              `DELETE FROM agro_silo_capacidades
+               WHERE silo_id=$1 AND cultivo=$2 AND tenant_id=$3`,
+              [req.params.id, cap.cultivo, tid(req)]
+            );
+          }
+        }
+      }
+    }
     res.json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -1015,6 +1072,46 @@ router.post('/silos/:id/ajustar', requireAdmin, async (req, res) => {
     if (!silo.rowCount) return res.status(404).json({ error: 'Silo no encontrado.' });
     const s = silo.rows[0];
 
+    const kilosActuales = await calcToneladasSilo(req.params.id, tid(req));
+    const cultivoFinal  = cultivo_nuevo !== undefined
+      ? cultivo_nuevo : s.cultivo_actual;
+
+    if (cultivo_nuevo !== undefined && cultivo_nuevo !== s.cultivo_actual) {
+      if (kilosActuales > 0) {
+        const capNueva = await query(
+          `SELECT capacidad_kg FROM agro_silo_capacidades
+           WHERE silo_id=$1 AND cultivo=$2`,
+          [req.params.id, cultivo_nuevo]
+        );
+        const maxNuevo = parseFloat(capNueva.rows[0]?.capacidad_kg || 0);
+        if (maxNuevo > 0 && kilosActuales > maxNuevo) {
+          return res.status(400).json({
+            error: `El silo tiene ${kilosActuales} kg de ${s.cultivo_actual||'cultivo actual'}. La capacidad máxima para ${cultivo_nuevo} es ${maxNuevo} kg. Reducí los kilos primero.`
+          });
+        }
+      }
+    }
+
+    if (kilos_ajuste) {
+      const nuevosKilos = kilosActuales + parseFloat(kilos_ajuste);
+      if (nuevosKilos < 0) {
+        return res.status(400).json({
+          error: `El ajuste dejaría el silo en ${nuevosKilos} kg. Mínimo permitido: 0 kg.`
+        });
+      }
+      const capCult = await query(
+        `SELECT capacidad_kg FROM agro_silo_capacidades
+         WHERE silo_id=$1 AND cultivo=$2`,
+        [req.params.id, cultivoFinal || s.cultivo_actual]
+      );
+      const maxCap = parseFloat(capCult.rows[0]?.capacidad_kg || 0);
+      if (maxCap > 0 && nuevosKilos > maxCap) {
+        return res.status(400).json({
+          error: `El ajuste dejaría el silo con ${nuevosKilos} kg, superando la capacidad máxima de ${maxCap} kg para ${cultivoFinal || s.cultivo_actual}.`
+        });
+      }
+    }
+
     await query(
       `INSERT INTO agro_ajustes_silo
          (tenant_id, silo_id, tipo, kilos, cultivo_anterior, cultivo_nuevo, obs)
@@ -1056,10 +1153,22 @@ router.get('/bolsas/por-establecimiento', async (req, res) => {
        ORDER BY e.nombre, l.nombre, b.creado_en`,
       [tid(req)]
     );
-    const rows = await Promise.all(result.rows.map(async b => ({
-      ...b,
-      toneladas_actuales: await calcToneladasBolsa(b.id, tid(req))
-    })));
+    const rows = await Promise.all(result.rows.map(async b => {
+      const actuales = await calcToneladasBolsa(b.id, tid(req));
+      const asignaciones = await query(
+        `SELECT COALESCE(SUM(kilos),0) AS total
+         FROM agro_cosecha_asignaciones
+         WHERE destino_bolsa_id=$1 AND tenant_id=$2`,
+        [b.id, tid(req)]
+      );
+      const totalIngresado = parseFloat(b.toneladas_totales || 0)
+                           + parseFloat(asignaciones.rows[0].total || 0);
+      return {
+        ...b,
+        toneladas_actuales: actuales,
+        total_ingresado:    totalIngresado,
+      };
+    }));
     res.json(rows);
   } catch (err) {
     console.error(err);
@@ -1190,6 +1299,25 @@ router.post('/bolsas/:id/mover', async (req, res) => {
   }
 });
 
+router.delete('/bolsas/:id', requireAdmin, async (req, res) => {
+  try {
+    const ton = await calcToneladasBolsa(req.params.id, tid(req));
+    if (ton > 0) {
+      return res.status(400).json({
+        error: `La bolsa tiene ${ton} kg. Solo se pueden eliminar bolsas vacías.`
+      });
+    }
+    await query(
+      `DELETE FROM agro_bolsas WHERE id=$1 AND tenant_id=$2`,
+      [req.params.id, tid(req)]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al eliminar bolsa.' });
+  }
+});
+
 // ── CAMIONES ─────────────────────────────────────────────
 
 router.put('/movimientos-camion/:id', async (req, res) => {
@@ -1208,6 +1336,19 @@ router.put('/movimientos-camion/:id', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error al editar movimiento.' });
+  }
+});
+
+router.delete('/movimientos-camion/:id', requireAdmin, async (req, res) => {
+  try {
+    await query(
+      `DELETE FROM agro_movimientos_camion WHERE id=$1 AND tenant_id=$2`,
+      [req.params.id, tid(req)]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al eliminar movimiento.' });
   }
 });
 
