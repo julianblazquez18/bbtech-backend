@@ -23,13 +23,14 @@ router.get('/', async (req, res) => {
     );
     const grpRes = await query(
       `SELECT g.*,
-         (SELECT COUNT(DISTINCT v.id)
+         (SELECT COUNT(DISTINCT v.caravana)
           FROM vacas v
           JOIN ciclos c ON c.id = v.ciclo_id
           WHERE c.grupo_id = g.id
             AND c.tenant_id = g.tenant_id
             AND c.estado != 'cerrado'
             AND v.tenant_id = g.tenant_id
+            AND (v.descarte IS NULL OR v.descarte = false)
          ) AS vaca_count_unico
        FROM grupos g
        WHERE g.tenant_id = $1
@@ -278,6 +279,25 @@ router.delete('/lotes/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Error al eliminar lote.' });
+  }
+});
+
+// GET /api/estancias/total-animales — caravanas únicas activas y no descartadas cross-rodeo
+router.get('/total-animales', async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT COUNT(DISTINCT v.caravana) AS total
+       FROM vacas v
+       JOIN ciclos c ON c.id = v.ciclo_id
+       WHERE v.tenant_id = $1
+         AND c.estado != 'cerrado'
+         AND (v.descarte IS NULL OR v.descarte = false)`,
+      [req.user.tenantId]
+    );
+    res.json({ total: parseInt(result.rows[0].total) || 0 });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al contar animales.' });
   }
 });
 

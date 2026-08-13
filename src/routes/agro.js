@@ -352,16 +352,25 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
     );
     const maxHaReg = parseFloat(loteInfoReg.rows[0]?.hectareas || 0);
     if (maxHaReg > 0 && hectareas) {
-      const yaReg = await query(
-        `SELECT COALESCE(SUM(hectareas),0) AS total
-         FROM agro_registros WHERE ciclo_id=$1 AND tipo=$2`,
-        [req.params.cicloId, tipo]
-      );
-      const totalHa = parseFloat(yaReg.rows[0].total) + parseFloat(hectareas);
-      if (totalHa > maxHaReg) {
-        return res.status(400).json({
-          error: `Las hectáreas de ${tipo} (${totalHa} ha) superan las del lote (${maxHaReg} ha). Máximo disponible: ${maxHaReg - parseFloat(yaReg.rows[0].total)} ha.`
-        });
+      if (tipo === 'siembra') {
+        const yaReg = await query(
+          `SELECT COALESCE(SUM(hectareas),0) AS total
+           FROM agro_registros
+           WHERE ciclo_id=$1 AND tipo=$2`,
+          [req.params.cicloId, tipo]
+        );
+        const totalHa = parseFloat(yaReg.rows[0].total) + parseFloat(hectareas);
+        if (totalHa > maxHaReg) {
+          return res.status(400).json({
+            error: `Las hectáreas de siembra (${totalHa} ha) superan las del lote (${maxHaReg} ha). Máximo disponible: ${(maxHaReg - parseFloat(yaReg.rows[0].total)).toFixed(1)} ha.`
+          });
+        }
+      } else if (tipo === 'fertilizacion' || tipo === 'pulverizacion') {
+        if (parseFloat(hectareas) > maxHaReg) {
+          return res.status(400).json({
+            error: `Las hectáreas de ${tipo} (${hectareas} ha) superan las del lote (${maxHaReg} ha). Máximo por registro: ${maxHaReg} ha.`
+          });
+        }
       }
     }
 
