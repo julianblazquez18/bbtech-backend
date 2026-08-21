@@ -1644,4 +1644,259 @@ router.delete('/tipos-cultivo/:id', requireAdmin, async (req, res) => {
   }
 });
 
+// ── CATÁLOGO PRODUCTOS FERTILIZACIÓN ─────────────────
+
+router.get('/productos-fert', async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT * FROM agro_productos_fert
+       WHERE tenant_id=$1 ORDER BY nombre`,
+      [tid(req)]
+    );
+    if (!result.rowCount) {
+      const defaults = ['Urea','MAP','DAP','Nitrato de amonio',
+        'Superfosfato simple','Cloruro de potasio'];
+      for (const nombre of defaults) {
+        await query(
+          `INSERT INTO agro_productos_fert (tenant_id, nombre)
+           VALUES ($1,$2)`,
+          [tid(req), nombre]
+        );
+      }
+      const r2 = await query(
+        `SELECT * FROM agro_productos_fert
+         WHERE tenant_id=$1 ORDER BY nombre`,
+        [tid(req)]
+      );
+      return res.json(r2.rows);
+    }
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
+router.post('/productos-fert', requireAdmin, async (req, res) => {
+  try {
+    const { nombre } = req.body;
+    if (!nombre?.trim()) return res.status(400).json({ error: 'Nombre requerido.' });
+    const r = await query(
+      `INSERT INTO agro_productos_fert (tenant_id, nombre)
+       VALUES ($1,$2) RETURNING *`,
+      [tid(req), nombre.trim()]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
+router.delete('/productos-fert/:id', requireAdmin, async (req, res) => {
+  try {
+    await query(
+      `DELETE FROM agro_productos_fert WHERE id=$1 AND tenant_id=$2`,
+      [req.params.id, tid(req)]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
+// ── CATÁLOGO PRODUCTOS PULVERIZACIÓN ─────────────────
+
+router.get('/productos-pulv', async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT * FROM agro_productos_pulv
+       WHERE tenant_id=$1 ORDER BY nombre`,
+      [tid(req)]
+    );
+    if (!result.rowCount) {
+      const defaults = ['Glifosato','2,4D','Atrazina','Cipermetrina',
+        'Clorpirifos','Mancozeb','Captan'];
+      for (const nombre of defaults) {
+        await query(
+          `INSERT INTO agro_productos_pulv (tenant_id, nombre)
+           VALUES ($1,$2)`,
+          [tid(req), nombre]
+        );
+      }
+      const r2 = await query(
+        `SELECT * FROM agro_productos_pulv
+         WHERE tenant_id=$1 ORDER BY nombre`,
+        [tid(req)]
+      );
+      return res.json(r2.rows);
+    }
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
+router.post('/productos-pulv', requireAdmin, async (req, res) => {
+  try {
+    const { nombre } = req.body;
+    if (!nombre?.trim()) return res.status(400).json({ error: 'Nombre requerido.' });
+    const r = await query(
+      `INSERT INTO agro_productos_pulv (tenant_id, nombre)
+       VALUES ($1,$2) RETURNING *`,
+      [tid(req), nombre.trim()]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
+router.delete('/productos-pulv/:id', requireAdmin, async (req, res) => {
+  try {
+    await query(
+      `DELETE FROM agro_productos_pulv WHERE id=$1 AND tenant_id=$2`,
+      [req.params.id, tid(req)]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
+// ── PULVERIZACIÓN MULTI-PRODUCTO ─────────────────────
+
+router.get('/ciclos/:cicloId/pulverizaciones', async (req, res) => {
+  try {
+    const grupos = await query(
+      `SELECT * FROM agro_pulv_grupos
+       WHERE ciclo_id=$1 AND tenant_id=$2
+       ORDER BY fecha ASC`,
+      [req.params.cicloId, tid(req)]
+    );
+    const result = await Promise.all(grupos.rows.map(async g => {
+      const prods = await query(
+        `SELECT * FROM agro_pulv_productos
+         WHERE grupo_id=$1 ORDER BY creado_en ASC`,
+        [g.id]
+      );
+      return { ...g, productos: prods.rows };
+    }));
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al obtener pulverizaciones.' });
+  }
+});
+
+router.post('/ciclos/:cicloId/pulverizaciones', async (req, res) => {
+  try {
+    const { fecha, hectareas, productos, obs } = req.body;
+    if (!fecha) return res.status(400).json({ error: 'Fecha requerida.' });
+    if (!Array.isArray(productos) || !productos.length) {
+      return res.status(400).json({ error: 'Al menos un producto requerido.' });
+    }
+
+    const loteInfo = await query(
+      `SELECT l.hectareas FROM agro_lotes l
+       JOIN agro_ciclos c ON c.lote_id = l.id
+       WHERE c.id=$1`,
+      [req.params.cicloId]
+    );
+    const maxHa = parseFloat(loteInfo.rows[0]?.hectareas || 0);
+    if (maxHa > 0 && hectareas && parseFloat(hectareas) > maxHa) {
+      return res.status(400).json({
+        error: `Las hectáreas (${hectareas}) superan las del lote (${maxHa} ha).`
+      });
+    }
+
+    const grupo = await query(
+      `INSERT INTO agro_pulv_grupos
+         (tenant_id, ciclo_id, fecha, hectareas, obs)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [tid(req), req.params.cicloId, fecha,
+       hectareas || null, obs || '']
+    );
+    const grupoId = grupo.rows[0].id;
+
+    for (const p of productos) {
+      if (p.producto) {
+        await query(
+          `INSERT INTO agro_pulv_productos
+             (tenant_id, grupo_id, producto, litros)
+           VALUES ($1,$2,$3,$4)`,
+          [tid(req), grupoId, p.producto, p.litros || null]
+        );
+      }
+    }
+
+    const prods = await query(
+      `SELECT * FROM agro_pulv_productos WHERE grupo_id=$1`,
+      [grupoId]
+    );
+    res.json({ ...grupo.rows[0], productos: prods.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al guardar pulverización.' });
+  }
+});
+
+router.put('/pulverizaciones/:id', async (req, res) => {
+  try {
+    const { fecha, hectareas, productos, obs } = req.body;
+    const result = await query(
+      `UPDATE agro_pulv_grupos SET
+         fecha     = COALESCE($1, fecha),
+         hectareas = COALESCE($2, hectareas),
+         obs       = COALESCE($3, obs)
+       WHERE id=$4 AND tenant_id=$5 RETURNING *`,
+      [fecha || null, hectareas ?? null, obs ?? null,
+       req.params.id, tid(req)]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
+
+    if (Array.isArray(productos)) {
+      await query(
+        `DELETE FROM agro_pulv_productos WHERE grupo_id=$1`,
+        [req.params.id]
+      );
+      for (const p of productos) {
+        if (p.producto) {
+          await query(
+            `INSERT INTO agro_pulv_productos
+               (tenant_id, grupo_id, producto, litros)
+             VALUES ($1,$2,$3,$4)`,
+            [tid(req), req.params.id, p.producto, p.litros || null]
+          );
+        }
+      }
+    }
+    const prods = await query(
+      `SELECT * FROM agro_pulv_productos WHERE grupo_id=$1`,
+      [req.params.id]
+    );
+    res.json({ ...result.rows[0], productos: prods.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al editar pulverización.' });
+  }
+});
+
+router.delete('/pulverizaciones/:id', async (req, res) => {
+  try {
+    await query(
+      `DELETE FROM agro_pulv_grupos WHERE id=$1 AND tenant_id=$2`,
+      [req.params.id, tid(req)]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al eliminar.' });
+  }
+});
+
 module.exports = router;
