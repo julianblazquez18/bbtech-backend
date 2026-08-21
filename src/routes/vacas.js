@@ -291,4 +291,42 @@ router.delete('/', async (req, res) => {
   }
 });
 
+// ── Búsqueda de caravana ──────────────────────────────────────
+router.get('/buscar', async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q || q.length < 5) {
+      return res.status(400).json({ error: 'Mínimo 5 caracteres.' });
+    }
+    const result = await query(
+      `SELECT
+         v.id        AS _id,
+         v.caravana  AS "vacaId",
+         v.descarte,
+         c.id        AS ciclo_id,
+         c.nombre    AS ciclo_nombre,
+         c.estado    AS ciclo_estado,
+         g.id        AS rodeo_id,
+         g.nombre    AS rodeo_nombre,
+         e.id        AS campo_id,
+         e.nombre    AS campo_nombre
+       FROM vacas v
+       JOIN ciclos c    ON c.id = v.ciclo_id
+       JOIN grupos g    ON g.id = c.grupo_id
+       JOIN estancias e ON e.id = g.estancia_id
+       WHERE v.tenant_id = $1
+         AND c.estado != 'cerrado'
+         AND v.descarte IS NOT TRUE
+         AND v.caravana ILIKE $2
+       ORDER BY v.caravana ASC
+       LIMIT 30`,
+      [req.user.tenantId, `%${q}%`]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error en la búsqueda.' });
+  }
+});
+
 module.exports = router;
