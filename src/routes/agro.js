@@ -249,10 +249,39 @@ router.delete('/lotes/:id', requireAdmin, async (req, res) => {
       );
     }
 
-    await client.query(
-      `DELETE FROM agro_bolsas WHERE lote_id=$1 AND tenant_id=$2`,
+    // Primero obtener las bolsas del lote
+    const bolsas = await client.query(
+      `SELECT id FROM agro_bolsas WHERE lote_id=$1 AND tenant_id=$2`,
       [loteId, tId]
     );
+    const bolsaIds = bolsas.rows.map(b => b.id);
+
+    if (bolsaIds.length > 0) {
+      // Eliminar movimientos de camión que referencian estas bolsas
+      await client.query(
+        `DELETE FROM agro_movimientos_camion
+         WHERE origen_bolsa_id = ANY($1) AND tenant_id=$2`,
+        [bolsaIds, tId]
+      );
+      // Eliminar asignaciones de cosecha que referencian estas bolsas
+      // (las del ciclo ya se borraron, pero puede haber de otros ciclos)
+      await client.query(
+        `DELETE FROM agro_cosecha_asignaciones
+         WHERE destino_bolsa_id = ANY($1) AND tenant_id=$2`,
+        [bolsaIds, tId]
+      );
+      // Eliminar cosechas que referencian estas bolsas
+      await client.query(
+        `DELETE FROM agro_cosechas
+         WHERE destino_bolsa_id = ANY($1) AND tenant_id=$2`,
+        [bolsaIds, tId]
+      );
+      // Ahora sí eliminar las bolsas
+      await client.query(
+        `DELETE FROM agro_bolsas WHERE lote_id=$1 AND tenant_id=$2`,
+        [loteId, tId]
+      );
+    }
     await client.query(
       `DELETE FROM agro_lotes WHERE id=$1 AND tenant_id=$2`,
       [loteId, tId]
