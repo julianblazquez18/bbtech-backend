@@ -124,15 +124,43 @@ router.put('/lotes/:id', requireAdmin, async (req, res) => {
 });
 
 router.delete('/lotes/:id', requireAdmin, async (req, res) => {
+  const client = await require('../db/pool').pool.connect();
   try {
-    await query(
-      `DELETE FROM serv_lotes WHERE id=$1 AND tenant_id=$2`,
-      [req.params.id, tid(req)]
+    await client.query('BEGIN');
+    const loteId = req.params.id;
+    const tId    = tid(req);
+
+    const ciclos = await client.query(
+      `SELECT id FROM serv_ciclos WHERE lote_id=$1 AND tenant_id=$2`,
+      [loteId, tId]
     );
+    const cicloIds = ciclos.rows.map(c => c.id);
+
+    if (cicloIds.length > 0) {
+      await client.query(
+        `DELETE FROM serv_registros
+         WHERE ciclo_id = ANY($1) AND tenant_id=$2`,
+        [cicloIds, tId]
+      );
+      await client.query(
+        `DELETE FROM serv_ciclos WHERE lote_id=$1 AND tenant_id=$2`,
+        [loteId, tId]
+      );
+    }
+
+    await client.query(
+      `DELETE FROM serv_lotes WHERE id=$1 AND tenant_id=$2`,
+      [loteId, tId]
+    );
+
+    await client.query('COMMIT');
     res.json({ ok: true });
   } catch (err) {
-    console.error(err);
+    await client.query('ROLLBACK');
+    console.error('Error eliminando lote serv:', err);
     res.status(500).json({ error: 'Error al eliminar lote.' });
+  } finally {
+    client.release();
   }
 });
 

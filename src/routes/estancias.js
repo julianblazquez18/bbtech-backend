@@ -30,7 +30,8 @@ router.get('/', async (req, res) => {
             AND c.tenant_id = g.tenant_id
             AND c.estado != 'cerrado'
             AND v.tenant_id = g.tenant_id
-            AND (v.descarte IS NULL OR v.descarte = false)
+            AND (v.descarte IS NULL OR v.descarte = FALSE)
+            AND (v.traspasada IS NULL OR v.traspasada = FALSE)
          ) AS vaca_count_unico
        FROM grupos g
        WHERE g.tenant_id = $1

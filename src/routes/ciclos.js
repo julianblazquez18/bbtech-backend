@@ -49,7 +49,16 @@ router.get('/', async (req, res) => {
     // Query ciclos con conteo de vacas en una sola query via subquery
     let sql = `
       SELECT c.*,
-        (SELECT COUNT(*) FROM vacas v WHERE v.ciclo_id = c.id AND v.tenant_id = c.tenant_id) AS vaca_count
+        (SELECT COUNT(*) FROM vacas v
+         WHERE v.ciclo_id = c.id
+           AND v.tenant_id = c.tenant_id
+           AND (v.descarte IS NULL OR v.descarte = FALSE)
+           AND (v.traspasada IS NULL OR v.traspasada = FALSE)
+        ) AS vaca_count,
+        (SELECT COUNT(*) FROM vacas v
+         WHERE v.ciclo_id = c.id
+           AND v.tenant_id = c.tenant_id
+        ) AS vaca_count_total
       FROM ciclos c
       WHERE c.tenant_id = $1`;
     const params = [tid];
@@ -372,6 +381,13 @@ router.post('/:id/traspasar', async (req, res) => {
            VALUES ($1, $2, $3, $4, $5)
            RETURNING id`,
           [tid, aCicloId, v.caravana, v.grupo_actual_id, destGrupoId]
+        );
+
+        // Marcar la vaca origen como traspasada
+        await client.query(
+          `UPDATE vacas SET traspasada = TRUE
+           WHERE ciclo_id = $1 AND caravana = $2 AND tenant_id = $3`,
+          [req.params.id, v.caravana, tid]
         );
 
         // Registrar movimiento

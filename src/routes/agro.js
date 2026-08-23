@@ -183,15 +183,89 @@ router.put('/lotes/:id', requireAdmin, async (req, res) => {
 });
 
 router.delete('/lotes/:id', requireAdmin, async (req, res) => {
+  const client = await require('../db/pool').pool.connect();
   try {
-    await query(
-      `DELETE FROM agro_lotes WHERE id=$1 AND tenant_id=$2`,
-      [req.params.id, tid(req)]
+    await client.query('BEGIN');
+    const loteId = req.params.id;
+    const tId    = tid(req);
+
+    const ciclos = await client.query(
+      `SELECT id FROM agro_ciclos WHERE lote_id=$1 AND tenant_id=$2`,
+      [loteId, tId]
     );
+    const cicloIds = ciclos.rows.map(c => c.id);
+
+    if (cicloIds.length > 0) {
+      await client.query(
+        `DELETE FROM agro_cosecha_asignaciones
+         WHERE ciclo_id = ANY($1) AND tenant_id=$2`,
+        [cicloIds, tId]
+      );
+      await client.query(
+        `DELETE FROM agro_cosechas
+         WHERE ciclo_id = ANY($1) AND tenant_id=$2`,
+        [cicloIds, tId]
+      );
+      await client.query(
+        `DELETE FROM agro_registros
+         WHERE ciclo_id = ANY($1) AND tenant_id=$2`,
+        [cicloIds, tId]
+      );
+      const pulvGrupos = await client.query(
+        `SELECT id FROM agro_pulv_grupos
+         WHERE ciclo_id = ANY($1) AND tenant_id=$2`,
+        [cicloIds, tId]
+      );
+      const pulvIds = pulvGrupos.rows.map(g => g.id);
+      if (pulvIds.length > 0) {
+        await client.query(
+          `DELETE FROM agro_pulv_productos WHERE grupo_id = ANY($1)`,
+          [pulvIds]
+        );
+        await client.query(
+          `DELETE FROM agro_pulv_grupos WHERE id = ANY($1)`,
+          [pulvIds]
+        );
+      }
+      const fertGrupos = await client.query(
+        `SELECT id FROM agro_fert_grupos
+         WHERE ciclo_id = ANY($1) AND tenant_id=$2`,
+        [cicloIds, tId]
+      ).catch(() => ({ rows: [] }));
+      const fertIds = fertGrupos.rows.map(g => g.id);
+      if (fertIds.length > 0) {
+        await client.query(
+          `DELETE FROM agro_fert_productos WHERE grupo_id = ANY($1)`,
+          [fertIds]
+        );
+        await client.query(
+          `DELETE FROM agro_fert_grupos WHERE id = ANY($1)`,
+          [fertIds]
+        );
+      }
+      await client.query(
+        `DELETE FROM agro_ciclos WHERE lote_id=$1 AND tenant_id=$2`,
+        [loteId, tId]
+      );
+    }
+
+    await client.query(
+      `DELETE FROM agro_bolsas WHERE lote_id=$1 AND tenant_id=$2`,
+      [loteId, tId]
+    );
+    await client.query(
+      `DELETE FROM agro_lotes WHERE id=$1 AND tenant_id=$2`,
+      [loteId, tId]
+    );
+
+    await client.query('COMMIT');
     res.json({ ok: true });
   } catch (err) {
-    console.error(err);
+    await client.query('ROLLBACK');
+    console.error('Error eliminando lote agro:', err);
     res.status(500).json({ error: 'Error al eliminar lote.' });
+  } finally {
+    client.release();
   }
 });
 
@@ -393,24 +467,25 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
 
 router.put('/registros/:id', async (req, res) => {
   try {
-    const { fecha, hectareas, cultivo, tipo, variedad,
+    const { fecha, fecha_fin, hectareas, cultivo, tipo, variedad,
             kilos, producto, cantidad_kg, obs } = req.body;
     const result = await query(
       `UPDATE agro_registros SET
          fecha       = COALESCE($1, fecha),
-         hectareas   = COALESCE($2, hectareas),
-         cultivo     = COALESCE($3, cultivo),
-         tipo        = COALESCE($4, tipo),
-         variedad    = COALESCE($5, variedad),
-         toneladas   = COALESCE($6, toneladas),
-         producto    = COALESCE($7, producto),
-         cantidad_kg = COALESCE($8, cantidad_kg),
-         obs         = COALESCE($9, obs)
-       WHERE id=$10 AND tenant_id=$11 RETURNING *`,
-      [fecha||null, hectareas??null, cultivo||null,
-       tipo||null, variedad||null, kilos??null,
-       producto||null, cantidad_kg??null, obs||null,
-       req.params.id, tid(req)]
+         fecha_fin   = COALESCE($2, fecha_fin),
+         hectareas   = COALESCE($3, hectareas),
+         cultivo     = COALESCE($4, cultivo),
+         tipo        = COALESCE($5, tipo),
+         variedad    = COALESCE($6, variedad),
+         toneladas   = COALESCE($7, toneladas),
+         producto    = COALESCE($8, producto),
+         cantidad_kg = COALESCE($9, cantidad_kg),
+         obs         = COALESCE($10, obs)
+       WHERE id=$11 AND tenant_id=$12 RETURNING *`,
+      [fecha||null, fecha_fin||null, hectareas??null,
+       cultivo||null, tipo||null, variedad||null,
+       kilos??null, producto||null, cantidad_kg??null,
+       obs||null, req.params.id, tid(req)]
     );
     if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
     res.json(result.rows[0]);
@@ -1890,6 +1965,133 @@ router.delete('/pulverizaciones/:id', async (req, res) => {
   try {
     await query(
       `DELETE FROM agro_pulv_grupos WHERE id=$1 AND tenant_id=$2`,
+      [req.params.id, tid(req)]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al eliminar.' });
+  }
+});
+
+// ── FERTILIZACIÓN MULTI-PRODUCTO ─────────────────────
+
+router.get('/ciclos/:cicloId/fertilizaciones', async (req, res) => {
+  try {
+    const grupos = await query(
+      `SELECT * FROM agro_fert_grupos
+       WHERE ciclo_id=$1 AND tenant_id=$2
+       ORDER BY fecha ASC`,
+      [req.params.cicloId, tid(req)]
+    );
+    const result = await Promise.all(grupos.rows.map(async g => {
+      const prods = await query(
+        `SELECT * FROM agro_fert_productos
+         WHERE grupo_id=$1 ORDER BY creado_en ASC`,
+        [g.id]
+      );
+      return { ...g, productos: prods.rows };
+    }));
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al obtener fertilizaciones.' });
+  }
+});
+
+router.post('/ciclos/:cicloId/fertilizaciones', async (req, res) => {
+  try {
+    const { fecha, fecha_fin, hectareas, productos, obs } = req.body;
+    if (!fecha) return res.status(400).json({ error: 'Fecha requerida.' });
+    if (!Array.isArray(productos) || !productos.length) {
+      return res.status(400).json({ error: 'Al menos un producto requerido.' });
+    }
+    const loteInfo = await query(
+      `SELECT l.hectareas FROM agro_lotes l
+       JOIN agro_ciclos c ON c.lote_id = l.id
+       WHERE c.id=$1`,
+      [req.params.cicloId]
+    );
+    const maxHa = parseFloat(loteInfo.rows[0]?.hectareas || 0);
+    if (maxHa > 0 && hectareas && parseFloat(hectareas) > maxHa) {
+      return res.status(400).json({
+        error: `Las hectáreas (${hectareas}) superan las del lote (${maxHa} ha).`
+      });
+    }
+    const grupo = await query(
+      `INSERT INTO agro_fert_grupos
+         (tenant_id, ciclo_id, fecha, fecha_fin, hectareas, obs)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [tid(req), req.params.cicloId, fecha,
+       fecha_fin || null, hectareas || null, obs || '']
+    );
+    const grupoId = grupo.rows[0].id;
+    for (const p of productos) {
+      if (p.producto) {
+        await query(
+          `INSERT INTO agro_fert_productos
+             (tenant_id, grupo_id, producto, cantidad_kg)
+           VALUES ($1,$2,$3,$4)`,
+          [tid(req), grupoId, p.producto, p.cantidad_kg || null]
+        );
+      }
+    }
+    const prods = await query(
+      `SELECT * FROM agro_fert_productos WHERE grupo_id=$1`,
+      [grupoId]
+    );
+    res.json({ ...grupo.rows[0], productos: prods.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al guardar fertilización.' });
+  }
+});
+
+router.put('/fertilizaciones/:id', async (req, res) => {
+  try {
+    const { fecha, fecha_fin, hectareas, productos, obs } = req.body;
+    const result = await query(
+      `UPDATE agro_fert_grupos SET
+         fecha     = COALESCE($1, fecha),
+         fecha_fin = COALESCE($2, fecha_fin),
+         hectareas = COALESCE($3, hectareas),
+         obs       = COALESCE($4, obs)
+       WHERE id=$5 AND tenant_id=$6 RETURNING *`,
+      [fecha || null, fecha_fin || null, hectareas ?? null,
+       obs ?? null, req.params.id, tid(req)]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
+    if (Array.isArray(productos)) {
+      await query(
+        `DELETE FROM agro_fert_productos WHERE grupo_id=$1`,
+        [req.params.id]
+      );
+      for (const p of productos) {
+        if (p.producto) {
+          await query(
+            `INSERT INTO agro_fert_productos
+               (tenant_id, grupo_id, producto, cantidad_kg)
+             VALUES ($1,$2,$3,$4)`,
+            [tid(req), req.params.id, p.producto, p.cantidad_kg || null]
+          );
+        }
+      }
+    }
+    const prods = await query(
+      `SELECT * FROM agro_fert_productos WHERE grupo_id=$1`,
+      [req.params.id]
+    );
+    res.json({ ...result.rows[0], productos: prods.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al editar fertilización.' });
+  }
+});
+
+router.delete('/fertilizaciones/:id', async (req, res) => {
+  try {
+    await query(
+      `DELETE FROM agro_fert_grupos WHERE id=$1 AND tenant_id=$2`,
       [req.params.id, tid(req)]
     );
     res.json({ ok: true });
