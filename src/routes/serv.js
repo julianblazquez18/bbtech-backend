@@ -280,11 +280,11 @@ router.get('/ciclos/:cicloId/registros', async (req, res) => {
 
 router.post('/ciclos/:cicloId/registros', async (req, res) => {
   try {
-    const { tipo, fecha, hectareas, cultivo, tipo_cult,
-            variedad, kilos, destino, obs } = req.body;
+    const { tipo, fecha, fecha_fin, hectareas, cultivo, tipo_cult,
+            variedad, kilos, producto, destino, obs } = req.body;
 
-    if (!['siembra','cosecha'].includes(tipo)) {
-      return res.status(400).json({ error: 'Tipo inválido. Solo siembra o cosecha.' });
+    if (!['siembra','cosecha','fertilizacion'].includes(tipo)) {
+      return res.status(400).json({ error: 'Tipo inválido.' });
     }
     if (!fecha) return res.status(400).json({ error: 'Fecha requerida.' });
 
@@ -333,13 +333,13 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
 
     const result = await query(
       `INSERT INTO serv_registros
-         (tenant_id, ciclo_id, tipo, fecha, hectareas,
-          cultivo, tipo_cult, variedad, kilos, destino, obs)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+         (tenant_id, ciclo_id, tipo, fecha, fecha_fin, hectareas,
+          cultivo, tipo_cult, variedad, kilos, producto, destino, obs)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
       [tid(req), req.params.cicloId, tipo,
-       fecha, hectareas || null,
+       fecha, fecha_fin || null, hectareas || null,
        cultivo || null, tipo_cult || null, variedad || null,
-       kilos || null, destino || null, obs || '']
+       kilos || null, producto || null, destino || null, obs || '']
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -350,17 +350,20 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
 
 router.put('/registros/:id', async (req, res) => {
   try {
-    const { fecha, hectareas, kilos, destino, obs } = req.body;
+    const { fecha, fecha_fin, hectareas, kilos,
+            producto, destino, obs } = req.body;
     const result = await query(
       `UPDATE serv_registros SET
-         fecha     = COALESCE($1,fecha),
-         hectareas = COALESCE($2,hectareas),
-         kilos     = COALESCE($3,kilos),
-         destino   = COALESCE($4,destino),
-         obs       = COALESCE($5,obs)
-       WHERE id=$6 AND tenant_id=$7 RETURNING *`,
-      [fecha || null, hectareas ?? null, kilos ?? null,
-       destino || null, obs || null,
+         fecha     = COALESCE($1, fecha),
+         fecha_fin = COALESCE($2, fecha_fin),
+         hectareas = COALESCE($3, hectareas),
+         kilos     = COALESCE($4, kilos),
+         producto  = COALESCE($5, producto),
+         destino   = COALESCE($6, destino),
+         obs       = COALESCE($7, obs)
+       WHERE id=$8 AND tenant_id=$9 RETURNING *`,
+      [fecha || null, fecha_fin || null, hectareas ?? null,
+       kilos ?? null, producto || null, destino || null, obs || null,
        req.params.id, tid(req)]
     );
     if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
