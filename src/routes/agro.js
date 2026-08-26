@@ -430,33 +430,60 @@ router.get('/ciclos/:cicloId/registros', async (req, res) => {
 router.post('/ciclos/:cicloId/registros', async (req, res) => {
   try {
     const { tipo, fecha, hectareas, cultivo, variedad,
-            toneladas, producto, cantidad_kg, obs } = req.body;
+            toneladas, producto, cantidad_kg, obs,
+            es_pastura, clase } = req.body;
 
     if (!['siembra', 'fertilizacion', 'pulverizacion'].includes(tipo)) {
       return res.status(400).json({ error: 'Tipo inválido.' });
     }
 
     if (tipo === 'siembra') {
-      const ciclo = await query(
-        `SELECT cultivo, variedad, tipo FROM agro_ciclos WHERE id=$1`,
+      const cicloActual = await query(
+        `SELECT cultivo, variedad, tipo, es_pastura
+         FROM agro_ciclos WHERE id=$1`,
         [req.params.cicloId]
       );
-      const c = ciclo.rows[0];
-      if (c.cultivo && c.cultivo !== cultivo) {
-        return res.status(400).json({
-          error: `Este ciclo ya tiene cultivo "${c.cultivo}". No podés mezclar cultivos.`
-        });
+      const c = cicloActual.rows[0];
+
+      // Verificar consistencia pastura / no pastura
+      if (c.cultivo || c.es_pastura) {
+        const esPasturaReq    = es_pastura ? true : false;
+        const esPasturaCiclo  = c.es_pastura || false;
+        if (esPasturaReq !== esPasturaCiclo) {
+          const tipoActual = esPasturaCiclo ? 'pastura' : 'siembra normal';
+          const tipoNuevo  = esPasturaReq   ? 'pastura' : 'siembra normal';
+          return res.status(400).json({
+            error: `Este ciclo está configurado como "${tipoActual}". No se puede mezclar con "${tipoNuevo}".`
+          });
+        }
       }
-      // variedad aquí es el "Tipo" (Primera/Segunda) enviado desde el frontend
-      if (c.tipo && variedad && c.tipo !== variedad) {
-        return res.status(400).json({
-          error: `Este ciclo ya tiene tipo "${c.tipo}". No podés mezclar tipos.`
-        });
+
+      // Validaciones solo para siembra normal
+      if (!es_pastura) {
+        // variedad aquí es el "Tipo" (Primera/Segunda) enviado desde el frontend
+        if (c.cultivo && c.cultivo !== cultivo) {
+          return res.status(400).json({
+            error: `Este ciclo ya tiene cultivo "${c.cultivo}". No podés mezclar cultivos.`
+          });
+        }
+        if (c.tipo && variedad && c.tipo !== variedad) {
+          return res.status(400).json({
+            error: `Este ciclo ya tiene tipo "${c.tipo}". No podés mezclar tipos.`
+          });
+        }
+        if (!c.cultivo) {
+          await query(
+            `UPDATE agro_ciclos SET cultivo=$1, tipo=$2, variedad=$3 WHERE id=$4`,
+            [cultivo, variedad || null, obs || null, req.params.cicloId]
+          );
+        }
       }
-      if (!c.cultivo) {
+
+      // Si es la primera siembra pastura, marcar el ciclo
+      if (es_pastura && !c.es_pastura) {
         await query(
-          `UPDATE agro_ciclos SET cultivo=$1, tipo=$2, variedad=$3 WHERE id=$4`,
-          [cultivo, variedad || null, obs || null, req.params.cicloId]
+          `UPDATE agro_ciclos SET es_pastura=TRUE WHERE id=$1`,
+          [req.params.cicloId]
         );
       }
     }
@@ -473,7 +500,8 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
         const yaReg = await query(
           `SELECT COALESCE(SUM(hectareas),0) AS total
            FROM agro_registros
-           WHERE ciclo_id=$1 AND tipo=$2`,
+           WHERE ciclo_id=$1 AND tipo=$2
+             AND (es_pastura IS NULL OR es_pastura = FALSE)`,
           [req.params.cicloId, tipo]
         );
         const totalHa = parseFloat(yaReg.rows[0].total) + parseFloat(hectareas);
@@ -494,12 +522,14 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
     const result = await query(
       `INSERT INTO agro_registros
          (tenant_id, ciclo_id, tipo, fecha, hectareas,
-          cultivo, variedad, toneladas, producto, cantidad_kg, obs)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+          cultivo, variedad, toneladas, producto, cantidad_kg, obs,
+          es_pastura, clase)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
       [tid(req), req.params.cicloId, tipo,
        fecha, hectareas || null,
        cultivo || null, variedad || null, toneladas || null,
-       producto || null, cantidad_kg || null, obs || '']
+       producto || null, cantidad_kg || null, obs || '',
+       es_pastura ? true : false, clase || null]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -511,7 +541,8 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
 router.put('/registros/:id', async (req, res) => {
   try {
     const { fecha, fecha_fin, hectareas, cultivo, tipo, variedad,
-            kilos, producto, cantidad_kg, obs } = req.body;
+            kilos, producto, cantidad_kg, obs,
+            es_pastura, clase } = req.body;
     const result = await query(
       `UPDATE agro_registros SET
          fecha       = COALESCE($1, fecha),
@@ -523,12 +554,15 @@ router.put('/registros/:id', async (req, res) => {
          toneladas   = COALESCE($7, toneladas),
          producto    = COALESCE($8, producto),
          cantidad_kg = COALESCE($9, cantidad_kg),
-         obs         = COALESCE($10, obs)
-       WHERE id=$11 AND tenant_id=$12 RETURNING *`,
+         obs         = COALESCE($10, obs),
+         es_pastura  = COALESCE($11, es_pastura),
+         clase       = COALESCE($12, clase)
+       WHERE id=$13 AND tenant_id=$14 RETURNING *`,
       [fecha||null, fecha_fin||null, hectareas??null,
        cultivo||null, tipo||null, variedad||null,
        kilos??null, producto||null, cantidad_kg??null,
-       obs||null, req.params.id, tid(req)]
+       obs||null, es_pastura??null, clase||null,
+       req.params.id, tid(req)]
     );
     if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
     res.json(result.rows[0]);
@@ -579,8 +613,8 @@ router.get('/ciclos/:cicloId/cosechas', async (req, res) => {
 
 router.post('/ciclos/:cicloId/cosechas', async (req, res) => {
   try {
-    const { fecha, hectareas, toneladas, destino_tipo,
-            destino_silo_id, destino_bolsa_id,
+    const { fecha, fecha_fin, hectareas, toneladas, clase,
+            destino_tipo, destino_silo_id, destino_bolsa_id,
             destino_camion_id, entidad_externa_id, obs } = req.body;
 
     if (destino_tipo && !['silo', 'bolsa', 'camion'].includes(destino_tipo)) {
@@ -634,12 +668,14 @@ router.post('/ciclos/:cicloId/cosechas', async (req, res) => {
 
     const result = await query(
       `INSERT INTO agro_cosechas
-         (tenant_id, ciclo_id, fecha, hectareas, toneladas,
-          destino_tipo, destino_silo_id, destino_bolsa_id,
-          destino_camion_id, entidad_externa_id, obs)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+         (tenant_id, ciclo_id, fecha, fecha_fin, hectareas,
+          toneladas, clase, destino_tipo, destino_silo_id,
+          destino_bolsa_id, destino_camion_id,
+          entidad_externa_id, obs)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
       [tid(req), req.params.cicloId, fecha,
-       hectareas || null, toneladas,
+       fecha_fin || null, hectareas || null,
+       toneladas || null, clase || 'cosecha',
        destino_tipo, destino_silo_id || null,
        destino_bolsa_id || null, destino_camion_id || null,
        entidad_externa_id || null, obs || '']
@@ -676,15 +712,15 @@ router.post('/ciclos/:cicloId/cosechas', async (req, res) => {
 
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Error al guardar cosecha.' });
+    console.error('COSECHA ERROR:', err.message, err.stack);
+    res.status(500).json({ error: err.message || 'Error al guardar cosecha.' });
   }
 });
 
 router.put('/cosechas/:id', async (req, res) => {
   try {
-    const { fecha, hectareas, kilos, obs,
-            destino_tipo, destino_silo_id, destino_bolsa_id,
+    const { fecha, fecha_fin, hectareas, kilos, clase,
+            obs, destino_tipo, destino_silo_id, destino_bolsa_id,
             destino_camion_id, entidad_externa_id } = req.body;
 
     let result;
@@ -692,16 +728,19 @@ router.put('/cosechas/:id', async (req, res) => {
       result = await query(
         `UPDATE agro_cosechas SET
            fecha              = COALESCE($1, fecha),
-           hectareas          = COALESCE($2, hectareas),
-           toneladas          = COALESCE($3, toneladas),
-           obs                = COALESCE($4, obs),
-           destino_tipo       = $5,
-           destino_silo_id    = $6,
-           destino_bolsa_id   = $7,
-           destino_camion_id  = $8,
-           entidad_externa_id = $9
-         WHERE id=$10 AND tenant_id=$11 RETURNING *`,
-        [fecha||null, hectareas??null, kilos??null, obs||null,
+           fecha_fin          = COALESCE($2, fecha_fin),
+           hectareas          = COALESCE($3, hectareas),
+           toneladas          = COALESCE($4, toneladas),
+           clase              = COALESCE($5, clase),
+           obs                = COALESCE($6, obs),
+           destino_tipo       = $7,
+           destino_silo_id    = $8,
+           destino_bolsa_id   = $9,
+           destino_camion_id  = $10,
+           entidad_externa_id = $11
+         WHERE id=$12 AND tenant_id=$13 RETURNING *`,
+        [fecha||null, fecha_fin||null, hectareas??null, kilos??null,
+         clase||null, obs||null,
          destino_tipo, destino_silo_id||null, destino_bolsa_id||null,
          destino_camion_id||null, entidad_externa_id||null,
          req.params.id, tid(req)]
@@ -710,12 +749,14 @@ router.put('/cosechas/:id', async (req, res) => {
       result = await query(
         `UPDATE agro_cosechas SET
            fecha     = COALESCE($1, fecha),
-           hectareas = COALESCE($2, hectareas),
-           toneladas = COALESCE($3, toneladas),
-           obs       = COALESCE($4, obs)
-         WHERE id=$5 AND tenant_id=$6 RETURNING *`,
-        [fecha||null, hectareas??null, kilos??null,
-         obs||null, req.params.id, tid(req)]
+           fecha_fin = COALESCE($2, fecha_fin),
+           hectareas = COALESCE($3, hectareas),
+           toneladas = COALESCE($4, toneladas),
+           clase     = COALESCE($5, clase),
+           obs       = COALESCE($6, obs)
+         WHERE id=$7 AND tenant_id=$8 RETURNING *`,
+        [fecha||null, fecha_fin||null, hectareas??null, kilos??null,
+         clase||null, obs||null, req.params.id, tid(req)]
       );
     }
     if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
@@ -1749,6 +1790,77 @@ router.delete('/cultivos/:id', requireAdmin, async (req, res) => {
   }
 });
 
+// ── CULTIVOS PASTURA ──────────────────────────────────────
+
+router.get('/cultivos-pastura', async (req, res) => {
+  try {
+    await query(
+      `CREATE TABLE IF NOT EXISTS agro_cultivos_pastura (
+        id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        nombre    TEXT NOT NULL,
+        creado_en TIMESTAMPTZ DEFAULT NOW()
+      )`, []
+    );
+    const existing = await query(
+      `SELECT * FROM agro_cultivos_pastura
+       WHERE tenant_id=$1 ORDER BY nombre`,
+      [tid(req)]
+    );
+    if (!existing.rowCount) {
+      const seeds = ['Alfalfa','Festuca','Pasto llorón',
+        'Cebadilla','Agropiro','Trébol rojo'];
+      for (const n of seeds) {
+        await query(
+          `INSERT INTO agro_cultivos_pastura (tenant_id, nombre)
+           VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+          [tid(req), n]
+        );
+      }
+      const seeded = await query(
+        `SELECT * FROM agro_cultivos_pastura
+         WHERE tenant_id=$1 ORDER BY nombre`,
+        [tid(req)]
+      );
+      return res.json(seeded.rows);
+    }
+    res.json(existing.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
+router.post('/cultivos-pastura', requireAdmin, async (req, res) => {
+  try {
+    const { nombre } = req.body;
+    if (!nombre?.trim())
+      return res.status(400).json({ error: 'nombre requerido.' });
+    const r = await query(
+      `INSERT INTO agro_cultivos_pastura (tenant_id, nombre)
+       VALUES ($1,$2) RETURNING *`,
+      [tid(req), nombre.trim()]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
+router.delete('/cultivos-pastura/:id', requireAdmin, async (req, res) => {
+  try {
+    await query(
+      `DELETE FROM agro_cultivos_pastura WHERE id=$1 AND tenant_id=$2`,
+      [req.params.id, tid(req)]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
 // ── TIPOS DE CULTIVO ──────────────────────────────────────
 
 router.get('/tipos-cultivo', async (req, res) => {
@@ -2620,6 +2732,159 @@ router.get('/reporte/camiones', async (req, res) => {
   } catch (err) {
     console.error('REPORTE CAMIONES ERROR:', err.message);
     res.status(500).json({ error: 'Error al generar reporte de camiones.' });
+  }
+});
+
+// ══════════════════════════════════════════════════
+// PASTURA GRUPOS
+// ══════════════════════════════════════════════════
+
+router.get('/ciclos/:cicloId/pasturas', async (req, res) => {
+  try {
+    const grupos = await query(
+      `SELECT pg.*,
+         json_agg(
+           json_build_object(
+             'id', pc.id,
+             'cultivo', pc.cultivo,
+             'kilos_ha', pc.kilos_ha
+           ) ORDER BY pc.creado_en
+         ) AS cultivos
+       FROM agro_pastura_grupos pg
+       LEFT JOIN agro_pastura_cultivos pc
+         ON pc.grupo_id = pg.id
+       WHERE pg.ciclo_id=$1 AND pg.tenant_id=$2
+       GROUP BY pg.id
+       ORDER BY pg.fecha ASC`,
+      [req.params.cicloId, tid(req)]
+    );
+    res.json(grupos.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
+router.post('/ciclos/:cicloId/pasturas', async (req, res) => {
+  try {
+    const { fecha, fecha_fin, hectareas, cultivos } = req.body;
+    if (!fecha || !cultivos?.length) {
+      return res.status(400).json({
+        error: 'fecha y al menos un cultivo son requeridos.'
+      });
+    }
+
+    const loteInfo = await query(
+      `SELECT l.hectareas FROM agro_lotes l
+       JOIN agro_ciclos c ON c.lote_id = l.id
+       WHERE c.id=$1`,
+      [req.params.cicloId]
+    );
+    const maxHa = parseFloat(loteInfo.rows[0]?.hectareas || 0);
+    if (maxHa > 0 && hectareas) {
+      const yaGrupos = await query(
+        `SELECT COALESCE(SUM(hectareas),0) AS total
+         FROM agro_pastura_grupos
+         WHERE ciclo_id=$1 AND tenant_id=$2`,
+        [req.params.cicloId, tid(req)]
+      );
+      const totalHa = parseFloat(yaGrupos.rows[0].total)
+                    + parseFloat(hectareas);
+      if (totalHa > maxHa) {
+        return res.status(400).json({
+          error: `Las hectáreas de pastura (${totalHa} ha) superan las del lote (${maxHa} ha).`
+        });
+      }
+    }
+
+    await query(
+      `UPDATE agro_ciclos SET es_pastura=TRUE WHERE id=$1`,
+      [req.params.cicloId]
+    );
+
+    const grupo = await query(
+      `INSERT INTO agro_pastura_grupos
+         (tenant_id, ciclo_id, fecha, fecha_fin, hectareas)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [tid(req), req.params.cicloId, fecha,
+       fecha_fin || null, hectareas || null]
+    );
+    const grupoId = grupo.rows[0].id;
+
+    for (const c of cultivos) {
+      await query(
+        `INSERT INTO agro_pastura_cultivos
+           (tenant_id, grupo_id, cultivo, kilos_ha)
+         VALUES ($1,$2,$3,$4)`,
+        [tid(req), grupoId, c.cultivo, c.kilos_ha || null]
+      );
+    }
+
+    const result = await query(
+      `SELECT pg.*,
+         json_agg(json_build_object(
+           'id', pc.id, 'cultivo', pc.cultivo,
+           'kilos_ha', pc.kilos_ha
+         )) AS cultivos
+       FROM agro_pastura_grupos pg
+       LEFT JOIN agro_pastura_cultivos pc
+         ON pc.grupo_id = pg.id
+       WHERE pg.id=$1
+       GROUP BY pg.id`,
+      [grupoId]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al guardar pastura.' });
+  }
+});
+
+router.put('/pasturas/:grupoId', async (req, res) => {
+  try {
+    const { fecha, fecha_fin, hectareas, cultivos } = req.body;
+
+    await query(
+      `UPDATE agro_pastura_grupos SET
+         fecha=$1, fecha_fin=$2, hectareas=$3
+       WHERE id=$4 AND tenant_id=$5`,
+      [fecha, fecha_fin || null, hectareas || null,
+       req.params.grupoId, tid(req)]
+    );
+
+    if (cultivos?.length) {
+      await query(
+        `DELETE FROM agro_pastura_cultivos WHERE grupo_id=$1`,
+        [req.params.grupoId]
+      );
+      for (const c of cultivos) {
+        await query(
+          `INSERT INTO agro_pastura_cultivos
+             (tenant_id, grupo_id, cultivo, kilos_ha)
+           VALUES ($1,$2,$3,$4)`,
+          [tid(req), req.params.grupoId,
+           c.cultivo, c.kilos_ha || null]
+        );
+      }
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error.' });
+  }
+});
+
+router.delete('/pasturas/:grupoId', async (req, res) => {
+  try {
+    await query(
+      `DELETE FROM agro_pastura_grupos
+       WHERE id=$1 AND tenant_id=$2`,
+      [req.params.grupoId, tid(req)]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error.' });
   }
 });
 
