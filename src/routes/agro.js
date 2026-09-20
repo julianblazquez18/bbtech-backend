@@ -1482,7 +1482,8 @@ router.post('/bolsas', async (req, res) => {
 router.post('/bolsas/:id/mover', async (req, res) => {
   try {
     const { camion_id, fecha, toneladas, entidad_externa_id,
-            destino_categoria, destino_silo_id } = req.body;
+            destino_categoria, destino_silo_id,
+            destino_bolsa_id } = req.body;
     if (!toneladas) return res.status(400).json({ error: 'toneladas requerido.' });
     if (!destino_categoria) {
       return res.status(400).json({ error: 'destino_categoria requerido.' });
@@ -1528,12 +1529,53 @@ router.post('/bolsas/:id/mover', async (req, res) => {
       }
     }
 
+    if (destino_categoria === 'bolsa' && destino_bolsa_id) {
+      const bolsaDest = await query(
+        `SELECT id, cultivo, tipo, variedad, cerrada
+         FROM agro_bolsas
+         WHERE id=$1 AND tenant_id=$2`,
+        [destino_bolsa_id, tid(req)]
+      );
+      if (!bolsaDest.rowCount) {
+        return res.status(404).json({ error: 'Bolsa destino no encontrada.' });
+      }
+      const bd = bolsaDest.rows[0];
+      if (bd.cerrada) {
+        return res.status(400).json({ error: 'La bolsa destino está cerrada.' });
+      }
+      if (bd.cultivo && b.cultivo && bd.cultivo !== b.cultivo) {
+        return res.status(400).json({
+          error: `Cultivo incompatible: la bolsa destino tiene ${bd.cultivo}.`
+        });
+      }
+      await query(
+        `UPDATE agro_bolsas SET
+           cultivo  = COALESCE(cultivo,  $1),
+           tipo = CASE
+             WHEN tipo IS NULL OR tipo = $2 THEN $2
+             WHEN $2 IS NULL THEN tipo
+             WHEN tipo NOT LIKE '%' || $2 || '%' THEN tipo || ' + ' || $2
+             ELSE tipo
+           END,
+           variedad = CASE
+             WHEN variedad IS NULL OR variedad = $3 THEN $3
+             WHEN $3 IS NULL THEN variedad
+             WHEN variedad NOT LIKE '%' || $3 || '%' THEN variedad || ' + ' || $3
+             ELSE variedad
+           END,
+           toneladas_totales = toneladas_totales + $4
+         WHERE id=$5`,
+        [b.cultivo||null, b.tipo||null, b.variedad||null, toneladas, destino_bolsa_id]
+      );
+    }
+
     await query(
       `INSERT INTO agro_movimientos_camion
          (tenant_id, camion_id, fecha, origen_tipo, origen_bolsa_id,
           cultivo, tipo, variedad, toneladas,
-          entidad_externa_id, destino_categoria, destino_silo_id)
-       VALUES ($1,$2,$3,'bolsa',$4,$5,$6,$7,$8,$9,$10,$11)`,
+          entidad_externa_id, destino_categoria, destino_silo_id,
+          destino_bolsa_id)
+       VALUES ($1,$2,$3,'bolsa',$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [tid(req),
        destino_categoria === 'camion' ? camion_id : null,
        fecha || new Date().toISOString().slice(0,10),
@@ -1544,7 +1586,8 @@ router.post('/bolsas/:id/mover', async (req, res) => {
        toneladas,
        destino_categoria === 'camion' ? entidad_externa_id||null : null,
        destino_categoria,
-       destino_categoria === 'silo' ? destino_silo_id||null : null]
+       destino_categoria === 'silo' ? destino_silo_id||null : null,
+       destino_categoria === 'bolsa' ? destino_bolsa_id||null : null]
     );
 
     const tonRestantes = tonActuales - toneladas;
@@ -2650,12 +2693,18 @@ router.get('/reporte/bolsas', async (req, res) => {
          CASE WHEN m.tipo IS NOT NULL
               THEN m.variedad ELSE NULL END AS variedad,
          s.nombre           AS silo_origen,
+         ob.nombre          AS bolsa_origen_nombre,
+         ol.nombre          AS bolsa_origen_lote,
+         oe.nombre          AS bolsa_origen_est,
          NULL::text         AS ciclo_nombre
        FROM agro_movimientos_camion m
-       JOIN agro_bolsas b              ON b.id  = m.destino_bolsa_id
-       JOIN agro_lotes l               ON l.id  = b.lote_id
-       JOIN agro_establecimientos est  ON est.id = l.establecimiento_id
-       LEFT JOIN agro_silos s          ON s.id  = m.origen_silo_id
+       JOIN agro_bolsas b                 ON b.id   = m.destino_bolsa_id
+       JOIN agro_lotes l                  ON l.id   = b.lote_id
+       JOIN agro_establecimientos est     ON est.id  = l.establecimiento_id
+       LEFT JOIN agro_silos s             ON s.id   = m.origen_silo_id
+       LEFT JOIN agro_bolsas ob           ON ob.id  = m.origen_bolsa_id
+       LEFT JOIN agro_lotes ol            ON ol.id  = ob.lote_id
+       LEFT JOIN agro_establecimientos oe ON oe.id  = ol.establecimiento_id
        WHERE m.tenant_id=$1
          AND m.fecha BETWEEN $2 AND $3
          AND m.destino_bolsa_id IS NOT NULL
