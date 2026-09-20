@@ -1841,9 +1841,23 @@ router.get('/cultivos', async (req, res) => {
         `SELECT * FROM agro_cultivos WHERE tenant_id=$1 ORDER BY nombre`,
         [tid(req)]
       );
-      return res.json(seeded.rows);
+      return res.json(seeded.rows.map(c => ({ ...c, variedades: [] })));
     }
-    res.json(result.rows);
+    const cultivos = result.rows;
+    const varRes = await query(
+      `SELECT cultivo_id, id, nombre
+       FROM agro_cultivo_variedades
+       WHERE tenant_id=$1
+       ORDER BY nombre ASC`,
+      [tid(req)]
+    );
+    const varMap = {};
+    varRes.rows.forEach(v => {
+      if (!varMap[v.cultivo_id]) varMap[v.cultivo_id] = [];
+      varMap[v.cultivo_id].push({ id: v.id, nombre: v.nombre });
+    });
+    cultivos.forEach(c => { c.variedades = varMap[c.id] || []; });
+    res.json(cultivos);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error al obtener cultivos.' });
@@ -1866,6 +1880,24 @@ router.post('/cultivos', requireAdmin, async (req, res) => {
   }
 });
 
+router.put('/cultivos/:id', requireAdmin, async (req, res) => {
+  try {
+    const { unidad } = req.body;
+    const result = await query(
+      `UPDATE agro_cultivos SET unidad = COALESCE($1, unidad)
+       WHERE id=$2 AND tenant_id=$3 RETURNING *`,
+      [unidad||null, req.params.id, tid(req)]
+    );
+    if (!result.rowCount) {
+      return res.status(404).json({ error: 'Cultivo no encontrado.' });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al actualizar cultivo.' });
+  }
+});
+
 router.delete('/cultivos/:id', requireAdmin, async (req, res) => {
   try {
     await query(
@@ -1876,6 +1908,58 @@ router.delete('/cultivos/:id', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error al eliminar cultivo.' });
+  }
+});
+
+router.get('/cultivos/:id/variedades', async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT id, nombre FROM agro_cultivo_variedades
+       WHERE cultivo_id=$1 AND tenant_id=$2
+       ORDER BY nombre ASC`,
+      [req.params.id, tid(req)]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al obtener variedades.' });
+  }
+});
+
+router.post('/cultivos/:id/variedades', requireAdmin, async (req, res) => {
+  try {
+    const { nombre } = req.body;
+    if (!nombre?.trim()) {
+      return res.status(400).json({ error: 'Nombre requerido.' });
+    }
+    const result = await query(
+      `INSERT INTO agro_cultivo_variedades (tenant_id, cultivo_id, nombre)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (tenant_id, cultivo_id, nombre) DO NOTHING
+       RETURNING *`,
+      [tid(req), req.params.id, nombre.trim()]
+    );
+    if (!result.rowCount) {
+      return res.status(409).json({ error: 'Esa variedad ya existe.' });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al agregar variedad.' });
+  }
+});
+
+router.delete('/cultivos/:id/variedades/:varId', requireAdmin, async (req, res) => {
+  try {
+    await query(
+      `DELETE FROM agro_cultivo_variedades
+       WHERE id=$1 AND cultivo_id=$2 AND tenant_id=$3`,
+      [req.params.varId, req.params.id, tid(req)]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al eliminar variedad.' });
   }
 });
 
