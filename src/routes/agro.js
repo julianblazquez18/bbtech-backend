@@ -885,11 +885,15 @@ router.get('/ciclos/:cicloId/asignaciones', async (req, res) => {
       `SELECT a.*,
          s.nombre   AS silo_nombre,
          b.nombre   AS bolsa_nombre,
+         l.nombre   AS lote_nombre,
+         e.nombre   AS establecimiento_nombre,
          cam.nombre AS camion_nombre,
          ext.nombre AS entidad_nombre
        FROM agro_cosecha_asignaciones a
        LEFT JOIN agro_silos s              ON s.id = a.destino_silo_id
        LEFT JOIN agro_bolsas b             ON b.id = a.destino_bolsa_id
+       LEFT JOIN agro_lotes l              ON l.id = b.lote_id
+       LEFT JOIN agro_establecimientos e   ON e.id = l.establecimiento_id
        LEFT JOIN agro_camiones cam         ON cam.id = a.destino_camion_id
        LEFT JOIN agro_entidades_externas ext ON ext.id = a.entidad_externa_id
        WHERE a.ciclo_id=$1 AND a.tenant_id=$2
@@ -999,8 +1003,18 @@ router.post('/ciclos/:cicloId/asignaciones', async (req, res) => {
       await query(
         `UPDATE agro_bolsas SET
            cultivo  = COALESCE(cultivo,  $1),
-           tipo     = COALESCE(tipo,     $2),
-           variedad = COALESCE(variedad, $3)
+           tipo = CASE
+             WHEN tipo IS NULL OR tipo = $2 THEN $2
+             WHEN $2 IS NULL THEN tipo
+             WHEN tipo NOT LIKE '%' || $2 || '%' THEN tipo || ' + ' || $2
+             ELSE tipo
+           END,
+           variedad = CASE
+             WHEN variedad IS NULL OR variedad = $3 THEN $3
+             WHEN $3 IS NULL THEN variedad
+             WHEN variedad NOT LIKE '%' || $3 || '%' THEN variedad || ' + ' || $3
+             ELSE variedad
+           END
          WHERE id=$4`,
         [cCultivo||null, cTipo||null, cVariedad||null, destino_bolsa_id]
       );
@@ -1353,6 +1367,33 @@ router.post('/silos/:id/ajustar', requireAdmin, async (req, res) => {
 });
 
 // ── BOLSAS ───────────────────────────────────────────────
+
+router.get('/bolsas/activas', async (req, res) => {
+  try {
+    const cultivo = req.query.cultivo || null;
+    const result = await query(
+      `SELECT
+         b.id, b.nombre, b.cultivo, b.tipo, b.variedad,
+         b.toneladas_totales, b.cerrada,
+         b.lote_id,
+         l.nombre          AS lote_nombre,
+         e.id              AS establecimiento_id,
+         e.nombre          AS establecimiento_nombre
+       FROM agro_bolsas b
+       JOIN agro_lotes l              ON l.id = b.lote_id
+       JOIN agro_establecimientos e   ON e.id = l.establecimiento_id
+       WHERE b.tenant_id = $1
+         AND b.cerrada = FALSE
+         ${cultivo ? 'AND b.cultivo = $2' : ''}
+       ORDER BY e.nombre, l.nombre, b.nombre`,
+      cultivo ? [tid(req), cultivo] : [tid(req)]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error al obtener bolsas.' });
+  }
+});
 
 router.get('/bolsas/por-establecimiento', async (req, res) => {
   try {
