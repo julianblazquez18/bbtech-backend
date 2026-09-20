@@ -431,7 +431,7 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
   try {
     const { tipo, fecha, hectareas, cultivo, variedad,
             toneladas, producto, cantidad_kg, obs,
-            es_pastura, clase } = req.body;
+            es_pastura, clase, unidad } = req.body;
 
     if (!['siembra', 'fertilizacion', 'pulverizacion'].includes(tipo)) {
       return res.status(400).json({ error: 'Tipo inválido.' });
@@ -523,13 +523,14 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
       `INSERT INTO agro_registros
          (tenant_id, ciclo_id, tipo, fecha, hectareas,
           cultivo, variedad, toneladas, producto, cantidad_kg, obs,
-          es_pastura, clase)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+          es_pastura, clase, unidad)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
       [tid(req), req.params.cicloId, tipo,
        fecha, hectareas || null,
        cultivo || null, variedad || null, toneladas || null,
        producto || null, cantidad_kg || null, obs || '',
-       es_pastura ? true : false, clase || null]
+       es_pastura ? true : false, clase || null,
+       unidad || 'kg']
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -542,7 +543,7 @@ router.put('/registros/:id', async (req, res) => {
   try {
     const { fecha, fecha_fin, hectareas, cultivo, tipo, variedad,
             kilos, producto, cantidad_kg, obs,
-            es_pastura, clase } = req.body;
+            es_pastura, clase, unidad } = req.body;
     const result = await query(
       `UPDATE agro_registros SET
          fecha       = COALESCE($1, fecha),
@@ -556,12 +557,14 @@ router.put('/registros/:id', async (req, res) => {
          cantidad_kg = COALESCE($9, cantidad_kg),
          obs         = COALESCE($10, obs),
          es_pastura  = COALESCE($11, es_pastura),
-         clase       = COALESCE($12, clase)
-       WHERE id=$13 AND tenant_id=$14 RETURNING *`,
+         clase       = COALESCE($12, clase),
+         unidad      = COALESCE($13, unidad)
+       WHERE id=$14 AND tenant_id=$15 RETURNING *`,
       [fecha||null, fecha_fin||null, hectareas??null,
        cultivo||null, tipo||null, variedad||null,
        kilos??null, producto||null, cantidad_kg??null,
        obs||null, es_pastura??null, clase||null,
+       unidad||null,
        req.params.id, tid(req)]
     );
     if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
@@ -1734,6 +1737,7 @@ router.get('/cultivos', async (req, res) => {
         id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id  UUID NOT NULL,
         nombre     TEXT NOT NULL,
+        unidad     TEXT DEFAULT 'kg',
         creado_en  TIMESTAMPTZ DEFAULT NOW()
       )`
     );
@@ -1764,11 +1768,12 @@ router.get('/cultivos', async (req, res) => {
 
 router.post('/cultivos', requireAdmin, async (req, res) => {
   try {
-    const { nombre } = req.body;
+    const { nombre, unidad } = req.body;
     if (!nombre) return res.status(400).json({ error: 'Nombre requerido.' });
     const result = await query(
-      `INSERT INTO agro_cultivos (tenant_id, nombre) VALUES ($1,$2) RETURNING *`,
-      [tid(req), nombre]
+      `INSERT INTO agro_cultivos (tenant_id, nombre, unidad)
+       VALUES ($1,$2,COALESCE($3,'kg')) RETURNING *`,
+      [tid(req), nombre, unidad || 'kg']
     );
     res.json(result.rows[0]);
   } catch (err) {
