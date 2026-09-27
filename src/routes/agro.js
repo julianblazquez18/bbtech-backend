@@ -11,6 +11,15 @@ const tid = req => req.user.tenantId;
 
 // ── HELPERS ──────────────────────────────────────────────
 
+function _mergeVariedad(varActual, varNueva) {
+  if (!varNueva) return varActual || null;
+  if (!varActual) return varNueva;
+  if (varActual === varNueva) return varActual;
+  const partes = varActual.split(' + ');
+  if (partes.includes(varNueva)) return varActual;
+  return varActual + ' + ' + varNueva;
+}
+
 async function calcToneladasSilo(siloId, tenantId) {
   // Solo contar transacciones posteriores al último reset del silo
   const ultimoReset = await query(
@@ -952,24 +961,42 @@ router.post('/ciclos/:cicloId/asignaciones', async (req, res) => {
 
     if (destino_tipo === 'silo' && destino_silo_id) {
       const cicloInfo = await query(
-        `SELECT cultivo FROM agro_ciclos WHERE id=$1`, [req.params.cicloId]
+        `SELECT cultivo, variedad FROM agro_ciclos WHERE id=$1`,
+        [req.params.cicloId]
       );
-      const cultivo = cicloInfo.rows[0]?.cultivo;
-      const siloInfo = await query(
-        `SELECT cultivo_actual FROM agro_silos WHERE id=$1`, [destino_silo_id]
+      const cultivo      = cicloInfo.rows[0]?.cultivo;
+      const cicloVariedad = cicloInfo.rows[0]?.variedad || null;
+
+      const siloActual = await query(
+        `SELECT cultivo_actual, variedad FROM agro_silos
+         WHERE id=$1 AND tenant_id=$2`,
+        [destino_silo_id, tid(req)]
       );
-      const siloCult = siloInfo.rows[0]?.cultivo_actual;
+      const siloCult     = siloActual.rows[0]?.cultivo_actual;
+      const siloVariedad = siloActual.rows[0]?.variedad || null;
+
       if (siloCult && cultivo && siloCult !== cultivo) {
         return res.status(400).json({
           error: `El silo ya tiene "${siloCult}". No podés mezclar cultivos.`
         });
       }
-      if (!siloCult && cultivo) {
-        await query(
-          `UPDATE agro_silos SET cultivo_actual=$1 WHERE id=$2`,
-          [cultivo, destino_silo_id]
-        );
+
+      let nuevaVariedad = siloVariedad;
+      const partesNuevasCiclo = (cicloVariedad || '')
+        .split(' + ')
+        .map(v => v.trim())
+        .filter(Boolean);
+      for (const parte of partesNuevasCiclo) {
+        nuevaVariedad = _mergeVariedad(nuevaVariedad, parte);
       }
+
+      await query(
+        `UPDATE agro_silos
+         SET cultivo_actual = COALESCE(cultivo_actual, $1),
+             variedad = $2
+         WHERE id=$3`,
+        [cultivo, nuevaVariedad, destino_silo_id]
+      );
     }
     if (destino_tipo === 'camion' && destino_camion_id) {
       const cicloInfo = await query(
@@ -1352,9 +1379,12 @@ router.post('/silos/:id/ajustar', requireAdmin, async (req, res) => {
        s.cultivo_actual, cultivo_nuevo || s.cultivo_actual, obs || '']
     );
 
-    if (cultivo_nuevo && cultivo_nuevo !== s.cultivo_actual) {
+    if (cultivo_nuevo !== undefined && cultivo_nuevo !== s.cultivo_actual) {
       await query(
-        `UPDATE agro_silos SET cultivo_actual=$1 WHERE id=$2`,
+        `UPDATE agro_silos
+         SET cultivo_actual = $1,
+             variedad = NULL
+         WHERE id=$2`,
         [cultivo_nuevo || null, req.params.id]
       );
     }
@@ -1525,12 +1555,29 @@ router.post('/bolsas/:id/mover', async (req, res) => {
          VALUES ($1,$2,'ajuste',$3,$4,'Recibido desde silo bolsa')`,
         [tid(req), destino_silo_id, toneladas, b.cultivo||null]
       );
-      if (!s.cultivo_actual && b.cultivo) {
-        await query(
-          `UPDATE agro_silos SET cultivo_actual=$1 WHERE id=$2`,
-          [b.cultivo, destino_silo_id]
-        );
+
+      const siloActual2 = await query(
+        `SELECT variedad FROM agro_silos WHERE id=$1 AND tenant_id=$2`,
+        [destino_silo_id, tid(req)]
+      );
+      const siloVar2 = siloActual2.rows[0]?.variedad || null;
+      // Mergear cada variedad por separado por si la bolsa tiene "A + B"
+      let nuevaVar2 = siloVar2;
+      const partesNuevas = (b.variedad || '')
+        .split(' + ')
+        .map(v => v.trim())
+        .filter(Boolean);
+      for (const parte of partesNuevas) {
+        nuevaVar2 = _mergeVariedad(nuevaVar2, parte);
       }
+
+      await query(
+        `UPDATE agro_silos
+         SET cultivo_actual = COALESCE(cultivo_actual, $1),
+             variedad = $2
+         WHERE id=$3`,
+        [b.cultivo, nuevaVar2, destino_silo_id]
+      );
     }
 
     if (destino_categoria === 'bolsa' && destino_bolsa_id) {
@@ -1719,6 +1766,14 @@ router.post('/ventas', async (req, res) => {
            VALUES ($1,$2,'ajuste',$3,'Venta')`,
           [t, origenId, -Math.abs(toneladas)]
         );
+        const tonRestantes = await calcToneladasSilo(origenId, t);
+        if (tonRestantes <= 0) {
+          await query(
+            `UPDATE agro_silos SET cultivo_actual = NULL, variedad = NULL
+             WHERE id=$1`,
+            [origenId]
+          );
+        }
         const movRes = await query(
           `INSERT INTO agro_movimientos_camion
              (tenant_id, camion_id, fecha, origen_tipo,
