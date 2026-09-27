@@ -439,7 +439,8 @@ router.get('/ciclos/:cicloId/registros', async (req, res) => {
 router.post('/ciclos/:cicloId/registros', async (req, res) => {
   try {
     const { tipo, fecha, hectareas, cultivo, variedad,
-            toneladas, producto, cantidad_kg, obs,
+            toneladas, producto, cantidad_kg,
+            cantidades_ha, obs,
             es_pastura, clase, unidad } = req.body;
 
     if (!['siembra', 'fertilizacion', 'pulverizacion'].includes(tipo)) {
@@ -532,48 +533,50 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
       `INSERT INTO agro_registros
          (tenant_id, ciclo_id, tipo, fecha, hectareas,
           cultivo, variedad, toneladas, producto, cantidad_kg, obs,
-          es_pastura, clase, unidad)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+          es_pastura, clase, unidad, cantidades_ha)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
       [tid(req), req.params.cicloId, tipo,
        fecha, hectareas || null,
        cultivo || null, variedad || null, toneladas || null,
        producto || null, cantidad_kg || null, obs || '',
        es_pastura ? true : false, clase || null,
-       unidad || 'kg']
+       unidad || 'kg', cantidades_ha || null]
     );
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Error al guardar registro.' });
+    console.error('ERROR POST REGISTROS:', err.message, err.stack);
+    res.status(500).json({ error: err.message || 'Error al guardar registro.' });
   }
 });
 
 router.put('/registros/:id', async (req, res) => {
   try {
     const { fecha, fecha_fin, hectareas, cultivo, tipo, variedad,
-            kilos, producto, cantidad_kg, obs,
+            kilos, producto, cantidad_kg,
+            cantidades_ha, obs,
             es_pastura, clase, unidad } = req.body;
     const result = await query(
       `UPDATE agro_registros SET
-         fecha       = COALESCE($1, fecha),
-         fecha_fin   = COALESCE($2, fecha_fin),
-         hectareas   = COALESCE($3, hectareas),
-         cultivo     = COALESCE($4, cultivo),
-         tipo        = COALESCE($5, tipo),
-         variedad    = COALESCE($6, variedad),
-         toneladas   = COALESCE($7, toneladas),
-         producto    = COALESCE($8, producto),
-         cantidad_kg = COALESCE($9, cantidad_kg),
-         obs         = COALESCE($10, obs),
-         es_pastura  = COALESCE($11, es_pastura),
-         clase       = COALESCE($12, clase),
-         unidad      = COALESCE($13, unidad)
-       WHERE id=$14 AND tenant_id=$15 RETURNING *`,
+         fecha         = COALESCE($1, fecha),
+         fecha_fin     = COALESCE($2, fecha_fin),
+         hectareas     = COALESCE($3, hectareas),
+         cultivo       = COALESCE($4, cultivo),
+         tipo          = COALESCE($5, tipo),
+         variedad      = COALESCE($6, variedad),
+         toneladas     = COALESCE($7, toneladas),
+         producto      = COALESCE($8, producto),
+         cantidad_kg   = COALESCE($9, cantidad_kg),
+         obs           = COALESCE($10, obs),
+         es_pastura    = COALESCE($11, es_pastura),
+         clase         = COALESCE($12, clase),
+         unidad        = COALESCE($13, unidad),
+         cantidades_ha = COALESCE($14, cantidades_ha)
+       WHERE id=$15 AND tenant_id=$16 RETURNING *`,
       [fecha||null, fecha_fin||null, hectareas??null,
        cultivo||null, tipo||null, variedad||null,
        kilos??null, producto||null, cantidad_kg??null,
        obs||null, es_pastura??null, clase||null,
-       unidad||null,
+       unidad||null, cantidades_ha||null,
        req.params.id, tid(req)]
     );
     if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
