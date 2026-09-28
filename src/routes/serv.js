@@ -281,7 +281,7 @@ router.get('/ciclos/:cicloId/registros', async (req, res) => {
 router.post('/ciclos/:cicloId/registros', async (req, res) => {
   try {
     const { tipo, fecha, fecha_fin, hectareas, cultivo, tipo_cult,
-            variedad, kilos, producto, destino, obs,
+            variedad, kilos, producto, destino, obs, cantidades_ha,
             es_pastura, clase, unidad } = req.body;
 
     if (!['siembra','cosecha','fertilizacion'].includes(tipo)) {
@@ -337,13 +337,14 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
       `INSERT INTO serv_registros
          (tenant_id, ciclo_id, tipo, fecha, fecha_fin, hectareas,
           cultivo, tipo_cult, variedad, kilos, producto, destino, obs,
-          es_pastura, clase, unidad)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+          es_pastura, clase, unidad, cantidades_ha)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
       [tid(req), req.params.cicloId, tipo,
        fecha, fecha_fin || null, hectareas || null,
        cultivo || null, tipo_cult || null, variedad || null,
        kilos || null, producto || null, destino || null, obs || '',
-       es_pastura ? true : false, clase || null, unidad || 'kg']
+       es_pastura ? true : false, clase || null, unidad || 'kg',
+       cantidades_ha || null]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -354,25 +355,27 @@ router.post('/ciclos/:cicloId/registros', async (req, res) => {
 
 router.put('/registros/:id', async (req, res) => {
   try {
-    const { fecha, fecha_fin, hectareas, kilos,
+    const { fecha, fecha_fin, hectareas, kilos, cantidades_ha,
             producto, destino, obs,
             es_pastura, clase, unidad } = req.body;
     const result = await query(
       `UPDATE serv_registros SET
-         fecha      = COALESCE($1, fecha),
-         fecha_fin  = COALESCE($2, fecha_fin),
-         hectareas  = COALESCE($3, hectareas),
-         kilos      = COALESCE($4, kilos),
-         producto   = COALESCE($5, producto),
-         destino    = COALESCE($6, destino),
-         obs        = COALESCE($7, obs),
-         es_pastura = COALESCE($8, es_pastura),
-         clase      = COALESCE($9, clase),
-         unidad     = COALESCE($10, unidad)
-       WHERE id=$11 AND tenant_id=$12 RETURNING *`,
+         fecha         = COALESCE($1, fecha),
+         fecha_fin     = COALESCE($2, fecha_fin),
+         hectareas     = COALESCE($3, hectareas),
+         kilos         = COALESCE($4, kilos),
+         producto      = COALESCE($5, producto),
+         destino       = COALESCE($6, destino),
+         obs           = COALESCE($7, obs),
+         es_pastura    = COALESCE($8, es_pastura),
+         clase         = COALESCE($9, clase),
+         unidad        = COALESCE($10, unidad),
+         cantidades_ha = COALESCE($11, cantidades_ha)
+       WHERE id=$12 AND tenant_id=$13 RETURNING *`,
       [fecha || null, fecha_fin || null, hectareas ?? null,
        kilos ?? null, producto || null, destino || null, obs || null,
        es_pastura ?? null, clase || null, unidad || null,
+       cantidades_ha || null,
        req.params.id, tid(req)]
     );
     if (!result.rowCount) return res.status(404).json({ error: 'No encontrado.' });
