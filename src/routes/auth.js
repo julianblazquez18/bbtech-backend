@@ -20,7 +20,8 @@ router.post('/login', async (req, res) => {
 
     // LEFT JOIN para soportar superadmin (tenant_id = NULL)
     const result = await query(
-      `SELECT u.*, t.nombre AS empresa_nombre, t.logo_url, t.aprobado
+      `SELECT u.*, t.nombre AS empresa_nombre, t.logo_url, t.aprobado,
+              t.suspendido AS tenant_suspendido, t.modulos AS tenant_modulos
        FROM usuarios u
        LEFT JOIN tenants t ON t.id = u.tenant_id
        WHERE LOWER(u.email) = LOWER($1)`,
@@ -43,16 +44,35 @@ router.post('/login', async (req, res) => {
       return res.status(403).json({ error: 'Tu cuenta está pendiente de aprobación. Contactá al administrador.' });
     }
 
+    // Bloquear si usuario suspendido
+    if (user.suspendido) {
+      return res.status(403).json({
+        error: 'Tu cuenta está suspendida. Contactá al administrador.'
+      });
+    }
+    // Bloquear si tenant suspendido (no aplica a superadmin)
+    if (user.rol !== 'superadmin' && user.tenant_suspendido) {
+      return res.status(403).json({
+        error: 'La cuenta de tu empresa está suspendida. Contactá a BBTECH.'
+      });
+    }
+
+    const modulosEfectivos = user.modulos
+      || user.tenant_modulos
+      || ['ganadero', 'agro', 'empleados', 'serv'];
+
     // Generar JWT con userId + tenantId (clave para multi-tenant)
     const token = jwt.sign(
       {
-        userId:        user.id,
-        tenantId:      user.tenant_id,
-        email:         user.email,
-        nombre:        user.nombre,
-        rol:           user.rol,
-        empresaNombre: user.empresa_nombre || '',
-        logoUrl:       user.logo_url       || '',
+        userId:           user.id,
+        tenantId:         user.tenant_id,
+        email:            user.email,
+        nombre:           user.nombre,
+        rol:              user.rol,
+        empresaNombre:    user.empresa_nombre || '',
+        logoUrl:          user.logo_url       || '',
+        modulos:          user.tenant_modulos || [],
+        modulosEfectivos: modulosEfectivos,
       },
       process.env.JWT_SECRET,
       { expiresIn: '8h' }
@@ -61,13 +81,15 @@ router.post('/login', async (req, res) => {
     res.json({
       token,
       user: {
-        id:            user.id,
-        nombre:        user.nombre,
-        email:         user.email,
-        rol:           user.rol,
-        tenantId:      user.tenant_id,
-        empresaNombre: user.empresa_nombre || '',
-        logoUrl:       user.logo_url       || '',
+        id:               user.id,
+        nombre:           user.nombre,
+        email:            user.email,
+        rol:              user.rol,
+        tenantId:         user.tenant_id,
+        empresaNombre:    user.empresa_nombre || '',
+        logoUrl:          user.logo_url       || '',
+        modulos:          user.tenant_modulos || [],
+        modulosEfectivos: modulosEfectivos,
       }
     });
 
@@ -83,7 +105,10 @@ router.get('/me', authMiddleware, async (req, res) => {
     // LEFT JOIN para soportar superadmin (tenant_id = NULL)
     const result = await query(
       `SELECT u.id, u.nombre, u.email, u.rol, u.tenant_id,
-              t.nombre AS empresa_nombre, t.logo_url
+              u.suspendido, u.modulos AS usuario_modulos,
+              t.nombre AS empresa_nombre, t.logo_url,
+              t.modulos AS tenant_modulos,
+              t.suspendido AS tenant_suspendido
        FROM usuarios u
        LEFT JOIN tenants t ON t.id = u.tenant_id
        WHERE u.id = $1`,
@@ -94,13 +119,19 @@ router.get('/me', authMiddleware, async (req, res) => {
     }
     const u = result.rows[0];
     res.json({
-      id:            u.id,
-      nombre:        u.nombre,
-      email:         u.email,
-      rol:           u.rol,
-      tenantId:      u.tenant_id,
-      empresaNombre: u.empresa_nombre || '',
-      logoUrl:       u.logo_url       || '',
+      id:               u.id,
+      nombre:           u.nombre,
+      email:            u.email,
+      rol:              u.rol,
+      tenantId:         u.tenant_id,
+      empresaNombre:    u.empresa_nombre || '',
+      logoUrl:          u.logo_url       || '',
+      modulos:          u.tenant_modulos || [],
+      modulosEfectivos: u.usuario_modulos
+        || u.tenant_modulos
+        || ['ganadero', 'agro', 'empleados', 'serv'],
+      suspendido:       u.suspendido,
+      tenantSuspendido: u.tenant_suspendido,
     });
   } catch (err) {
     res.status(500).json({ error: 'Error del servidor.' });

@@ -16,7 +16,7 @@ router.use(requireAdmin);
 router.get('/', async (req, res) => {
   try {
     const result = await query(
-      `SELECT id, nombre, email, rol, creado_en
+      `SELECT id, nombre, email, rol, modulos, suspendido, creado_en
        FROM usuarios
        WHERE tenant_id = $1
        ORDER BY creado_en ASC`,
@@ -32,7 +32,7 @@ router.get('/', async (req, res) => {
 // POST /api/usuarios — crear usuario en el tenant
 router.post('/', async (req, res) => {
   try {
-    const { nombre, email, password, rol } = req.body;
+    const { nombre, email, password, rol, modulos } = req.body;
     const tid = req.user.tenantId;
 
     if (!nombre?.trim() || !email?.trim() || !password || !rol) {
@@ -56,10 +56,10 @@ router.post('/', async (req, res) => {
 
     const hash = await bcrypt.hash(password, 12);
     const result = await query(
-      `INSERT INTO usuarios (tenant_id, email, password_hash, nombre, rol)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, nombre, email, rol, creado_en`,
-      [tid, email.trim().toLowerCase(), hash, nombre.trim(), rol]
+      `INSERT INTO usuarios (tenant_id, email, password_hash, nombre, rol, modulos)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, nombre, email, rol, modulos, suspendido, creado_en`,
+      [tid, email.trim().toLowerCase(), hash, nombre.trim(), rol, modulos || null]
     );
 
     res.status(201).json(result.rows[0]);
@@ -72,7 +72,7 @@ router.post('/', async (req, res) => {
 // PUT /api/usuarios/:id — editar nombre, rol y/o contraseña
 router.put('/:id', async (req, res) => {
   try {
-    const { nombre, rol, password } = req.body;
+    const { nombre, rol, password, modulos } = req.body;
     const tid = req.user.tenantId;
 
     // Verificar que el usuario pertenece al tenant
@@ -110,6 +110,10 @@ router.put('/:id', async (req, res) => {
       sets.push(`password_hash = $${vals.length + 1}`);
       vals.push(hash);
     }
+    if (modulos !== undefined) {
+      sets.push(`modulos = $${vals.length + 1}`);
+      vals.push(modulos || null);
+    }
 
     if (sets.length === 0) {
       return res.status(400).json({ error: 'Nada que actualizar.' });
@@ -119,7 +123,7 @@ router.put('/:id', async (req, res) => {
     const result = await query(
       `UPDATE usuarios SET ${sets.join(', ')}
        WHERE id = $${vals.length - 1} AND tenant_id = $${vals.length}
-       RETURNING id, nombre, email, rol, creado_en`,
+       RETURNING id, nombre, email, rol, modulos, suspendido, creado_en`,
       vals
     );
 

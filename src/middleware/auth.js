@@ -24,7 +24,7 @@ function authMiddleware(req, res, next) {
 
 // Middleware para verificar rol admin
 function requireAdmin(req, res, next) {
-  if (req.user.rol !== 'admin') {
+  if (req.user.rol !== 'admin' && req.user.rol !== 'superadmin') {
     return res.status(403).json({ error: 'Se requiere rol administrador.' });
   }
   next();
