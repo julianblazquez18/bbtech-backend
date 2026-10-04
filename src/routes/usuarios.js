@@ -32,7 +32,8 @@ router.get('/', async (req, res) => {
 // POST /api/usuarios — crear usuario en el tenant
 router.post('/', async (req, res) => {
   try {
-    const { nombre, email, password, rol, modulos } = req.body;
+    const { nombre, email, password, rol } = req.body;
+    let modulos = req.body.modulos || null;
     const tid = req.user.tenantId;
 
     if (!nombre?.trim() || !email?.trim() || !password || !rol) {
@@ -43,6 +44,16 @@ router.post('/', async (req, res) => {
     }
     if (password.length < 8) {
       return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres.' });
+    }
+
+    // Filtrar módulos contra los habilitados del tenant
+    if (modulos && modulos.length) {
+      const tenantRes = await query(
+        'SELECT modulos FROM tenants WHERE id = $1', [tid]
+      );
+      const tenantMods = tenantRes.rows[0]?.modulos || [];
+      const filtrados = modulos.filter(m => tenantMods.includes(m));
+      modulos = filtrados.length ? filtrados : null;
     }
 
     // Email único global
@@ -72,7 +83,8 @@ router.post('/', async (req, res) => {
 // PUT /api/usuarios/:id — editar nombre, rol y/o contraseña
 router.put('/:id', async (req, res) => {
   try {
-    const { nombre, rol, password, modulos } = req.body;
+    const { nombre, rol, password } = req.body;
+    let modulos = req.body.modulos;
     const tid = req.user.tenantId;
 
     // Verificar que el usuario pertenece al tenant
@@ -97,6 +109,16 @@ router.put('/:id', async (req, res) => {
       if (parseInt(adminCount.rows[0].count) <= 1) {
         return res.status(400).json({ error: 'No podés quitar el rol al único administrador.' });
       }
+    }
+
+    // Filtrar módulos contra los habilitados del tenant
+    if (modulos !== undefined && modulos && modulos.length) {
+      const tenantRes = await query(
+        'SELECT modulos FROM tenants WHERE id = $1', [tid]
+      );
+      const tenantMods = tenantRes.rows[0]?.modulos || [];
+      const filtrados = modulos.filter(m => tenantMods.includes(m));
+      modulos = filtrados.length ? filtrados : null;
     }
 
     // Construir SET dinámico
